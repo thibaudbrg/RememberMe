@@ -19,6 +19,9 @@ struct SettingsSheet: View {
     @State private var importPassphrase = ""
     @State private var showingImportPassphrase = false
 
+    @State private var showingAlphaConfirmation = false
+    @State private var showingGoogleConfirmation = false
+
     var body: some View {
         @Bindable var settings = settings
 
@@ -92,6 +95,55 @@ struct SettingsSheet: View {
                 } footer: {
                     Text("Backups never leave your device unless you share them. The file is encrypted with your passphrase using Argon2id + ChaCha20-Poly1305. Lose the passphrase, lose the backup — there's no recovery.")
                 }
+
+                Section {
+                    Toggle(isOn: $settings.alphaModeEnabled) {
+                        Label("Alpha features", systemImage: "flask")
+                    }
+                    .onChange(of: settings.alphaModeEnabled) { _, isOn in
+                        if isOn, !settings.alphaModeAcknowledged {
+                            showingAlphaConfirmation = true
+                        }
+                    }
+                    if settings.alphaModeEnabled {
+                        Picker("Routing provider", selection: $settings.refinementProvider) {
+                            ForEach(RefinementProvider.allCases) { provider in
+                                Text(provider.label).tag(provider)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .onChange(of: settings.refinementProvider) { _, newValue in
+                            if newValue == .google, !settings.googleRoutingAcknowledged {
+                                showingGoogleConfirmation = true
+                            }
+                        }
+
+                        switch settings.refinementProvider {
+                        case .apple:
+                            Label("Transit isn't supported — bus / train / subway trips will be skipped.", systemImage: "info.circle")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        case .google:
+                            SecureField("Google Directions API key", text: $settings.googleDirectionsAPIKey)
+                                .textContentType(.password)
+                                .autocorrectionDisabled()
+                                .textInputAutocapitalization(.never)
+                            if settings.googleDirectionsAPIKey.isEmpty {
+                                Label("Paste your key from Google Cloud Console.", systemImage: "exclamationmark.triangle")
+                                    .font(.caption)
+                                    .foregroundStyle(.orange)
+                            }
+                        }
+
+                        Label("Long-press a trip in the timeline to refine it.", systemImage: "hand.tap")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                } header: {
+                    Text("Alpha features")
+                } footer: {
+                    Text(alphaFooterText)
+                }
             }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
@@ -100,20 +152,19 @@ struct SettingsSheet: View {
                     Button("Done") { dismiss() }
                 }
             }
-            .fileImporter(
-                isPresented: $showingFileImporter,
-                allowedContentTypes: [.json, UTType(filenameExtension: "json") ?? .data],
-                allowsMultipleSelection: false
-            ) { result in
-                handleFilePick(result)
-            }
-            .fileImporter(
-                isPresented: $showingEncryptedImporter,
-                allowedContentTypes: [UTType(filenameExtension: "rmex") ?? .data, .data],
-                allowsMultipleSelection: false
-            ) { result in
-                handleEncryptedFilePick(result)
-            }
+            .background(
+                DocumentPicker(isPresented: $showingFileImporter, contentTypes: [.json]) { result in
+                    handleFilePick(result)
+                }
+            )
+            .background(
+                DocumentPicker(
+                    isPresented: $showingEncryptedImporter,
+                    contentTypes: [UTType(filenameExtension: "rmex") ?? .data, .data]
+                ) { result in
+                    handleEncryptedFilePick(result)
+                }
+            )
             .alert("Choose a passphrase", isPresented: $showingExportPassphrase) {
                 SecureField("Passphrase", text: $exportPassphrase)
                 SecureField("Confirm", text: $exportPassphraseConfirm)
@@ -143,9 +194,24 @@ struct SettingsSheet: View {
                 ShareSheet(items: [url])
                     .presentationDetents([.medium, .large])
             }
+            .sheet(isPresented: $showingAlphaConfirmation) {
+                AlphaConfirmationSheet(alphaEnabled: $settings.alphaModeEnabled)
+            }
+            .sheet(isPresented: $showingGoogleConfirmation) {
+                GoogleConfirmationSheet(selectedProvider: $settings.refinementProvider)
+            }
         }
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
+    }
+
+    private var alphaFooterText: String {
+        switch settings.refinementProvider {
+        case .apple:
+            "Apple Maps via MKDirections. Endpoint coordinates (rounded to ~11 m) leave your device; no API key, no Apple ID binding. Transit polylines are not exposed by Apple's API."
+        case .google:
+            "Google Directions API. Endpoint coordinates (rounded to ~11 m) plus your personal API key leave your device on every request. Google sees these calls under your Google Cloud account — not the app developer's."
+        }
     }
 
     // MARK: - Plaintext Takeout import row
@@ -163,7 +229,7 @@ struct SettingsSheet: View {
                 lastImportError = nil
                 showingFileImporter = true
             } label: {
-                Label("Import Google Takeout", systemImage: "square.and.arrow.down.on.square")
+                Label("Import Google Takeout", systemImage: "square.and.arrow.down")
             }
         }
     }
@@ -179,10 +245,9 @@ struct SettingsSheet: View {
         }
     }
 
-    private func handleFilePick(_ result: Result<[URL], any Error>) {
+    private func handleFilePick(_ result: Result<URL, Error>) {
         switch result {
-        case let .success(urls):
-            guard let url = urls.first else { return }
+        case let .success(url):
             Task { await environment.importTakeout(from: url) }
         case let .failure(error):
             lastImportError = error.localizedDescription
@@ -248,10 +313,9 @@ struct SettingsSheet: View {
         }
     }
 
-    private func handleEncryptedFilePick(_ result: Result<[URL], any Error>) {
+    private func handleEncryptedFilePick(_ result: Result<URL, Error>) {
         switch result {
-        case let .success(urls):
-            guard let url = urls.first else { return }
+        case let .success(url):
             pendingImportURL = url
             importPassphrase = ""
             showingImportPassphrase = true

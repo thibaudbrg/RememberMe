@@ -6,6 +6,22 @@ import SwiftUI
 /// Tapping a row sets the map's focused item (visit → coordinate, trip → polyline).
 struct TimelineDrawerContent: View {
     @Environment(AppEnvironment.self) private var environment
+    @Environment(Settings.self) private var settings
+    @State private var refinementContext: RefinementSheetContext?
+    @State private var refineDayRunning = false
+
+    /// Identifiable wrapper so `.sheet(item:)` can drive presentation. Carries both the
+    /// trip and the optional journey context — single-trip refinement passes nil, journey
+    /// passes the detected `Journey`.
+    struct RefinementSheetContext: Identifiable, Equatable {
+        let id = UUID()
+        let trip: TripSummary
+        let journey: Journey?
+
+        static func == (lhs: RefinementSheetContext, rhs: RefinementSheetContext) -> Bool {
+            lhs.id == rhs.id
+        }
+    }
 
     var body: some View {
         ScrollView {
@@ -25,18 +41,67 @@ struct TimelineDrawerContent: View {
                 if entries.isEmpty {
                     emptyState
                 } else if environment.selectedRange == .day {
-                    EventList(entries: entries) { entry in
-                        handleEventTap(entry)
-                    }
+                    EventList(
+                        entries: entries,
+                        onTap: handleEventTap,
+                        onRefine: handleRefineTap
+                    )
                     .padding(.horizontal, 20)
                 } else {
-                    GroupedEventList(entries: entries) { entry in
-                        handleEventTap(entry)
+                    GroupedEventList(
+                        entries: entries,
+                        onTap: handleEventTap,
+                        onRefine: handleRefineTap
+                    )
+                    .padding(.horizontal, 20)
+                }
+
+                if showRefineDayButton {
+                    RefineDayButton {
+                        refineDayRunning = true
                     }
                     .padding(.horizontal, 20)
+                    .padding(.top, 12)
                 }
             }
             .padding(.bottom, 32)
+        }
+        .sheet(isPresented: $refineDayRunning) {
+            RefineDayProgressSheet()
+                .presentationDetents([.large])
+        }
+        .sheet(item: $refinementContext, onDismiss: {
+            // Cleanup when the whole sheet closes (not when pushing internally — that's
+            // why we don't put this in the detail view's onDisappear, which fires on push
+            // and would clobber the navigation binding mid-flight).
+            environment.pathRefinement.state = .idle
+        }) { context in
+            NavigationStack {
+                PathRefinementTripDetailView(trip: context.trip, journey: context.journey)
+            }
+            .presentationDetents([.large])
+        }
+    }
+
+    /// Returns the matching `TripSummary` for an activity timeline entry — needed because
+    /// `TimelineEntry` carries only distance + mode, while `PathRefinementTripDetailView`
+    /// wants start/end coords. Looks up by id in `dayTrips`.
+    private func tripSummary(for entry: TimelineEntry) -> TripSummary? {
+        environment.dayTrips.first(where: { $0.id == entry.id })
+    }
+
+    private func handleRefineTap(_ entry: TimelineEntry, journey: Journey?) {
+        guard settings.alphaModeEnabled, let trip = tripSummary(for: entry) else { return }
+        refinementContext = RefinementSheetContext(trip: trip, journey: journey)
+    }
+
+    /// True when Alpha is on AND at least one trip on this day still needs refining and
+    /// has a routable mode. Used to gate the "Refine whole day" button.
+    private var showRefineDayButton: Bool {
+        guard settings.alphaModeEnabled else { return false }
+        return environment.dayTrips.contains { trip in
+            !environment.dayRefinedActivityIDs.contains(trip.id)
+                && RefinementMode.map(recordedMode: trip.mode) != nil
         }
     }
 
@@ -186,8 +251,11 @@ private struct SummaryChip: View {
 // MARK: - Event list
 
 private struct EventList: View {
+    @Environment(Settings.self) private var settings
+    @Environment(AppEnvironment.self) private var environment
     let entries: [TimelineEntry]
     let onTap: (TimelineEntry) -> Void
+    let onRefine: (TimelineEntry, Journey?) -> Void
 
     var body: some View {
         VStack(spacing: 0) {
@@ -195,6 +263,31 @@ private struct EventList: View {
                 EventTimelineRow(entry: entry)
                     .contentShape(Rectangle())
                     .onTapGesture { onTap(entry) }
+                    .contextMenu {
+                        if entry.kind == "activity", settings.alphaModeEnabled {
+                            // Precomputed lookup — runs in O(1). Same Journey instance for
+                            // every member leg, so A, B, and C all see identical menu items.
+                            let journey = environment.dayJourneysByAnchor[entry.id]
+                            Button {
+                                onRefine(entry, nil)
+                            } label: {
+                                Label(
+                                    "Refine this trip only",
+                                    systemImage: "point.topleft.down.curvedto.point.bottomright.up"
+                                )
+                            }
+                            if let journey, journey.isMultiLeg {
+                                Button {
+                                    onRefine(entry, journey)
+                                } label: {
+                                    Label(
+                                        "Refine whole journey — \(journey.legCount) legs",
+                                        systemImage: "arrow.triangle.branch"
+                                    )
+                                }
+                            }
+                        }
+                    }
                 if entry.id != entries.last?.id {
                     Divider().padding(.leading, 56)
                 }
@@ -209,6 +302,7 @@ private struct EventList: View {
 private struct GroupedEventList: View {
     let entries: [TimelineEntry]
     let onTap: (TimelineEntry) -> Void
+    let onRefine: (TimelineEntry, Journey?) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -218,7 +312,7 @@ private struct GroupedEventList: View {
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, 4)
-                    EventList(entries: group.entries, onTap: onTap)
+                    EventList(entries: group.entries, onTap: onTap, onRefine: onRefine)
                 }
             }
         }
@@ -250,12 +344,24 @@ private struct EventTimelineRow: View {
     @Environment(AppEnvironment.self) private var environment
     let entry: TimelineEntry
 
+    private var isRefined: Bool { environment.dayRefinedActivityIDs.contains(entry.id) }
+
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            Image(systemName: symbol)
-                .frame(width: 24, height: 24)
-                .foregroundStyle(.tint)
-                .padding(.top, 2)
+            ZStack(alignment: .bottomTrailing) {
+                Image(systemName: symbol)
+                    .frame(width: 24, height: 24)
+                    .foregroundStyle(.tint)
+                if isRefined {
+                    Image(systemName: "checkmark.seal.fill")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(.green)
+                        .background(Circle().fill(.background).frame(width: 13, height: 13))
+                        .offset(x: 5, y: 4)
+                        .accessibilityLabel("Refined")
+                }
+            }
+            .padding(.top, 2)
 
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
@@ -337,5 +443,25 @@ private struct EventTimelineRow: View {
         case "Search": "Searched place"
         default: type.isEmpty ? "Visit" : type
         }
+    }
+}
+
+/// Capsule call-to-action shown at the bottom of the timeline when there are still
+/// refinable trips on the selected day. Triggers the sequential runner sheet.
+private struct RefineDayButton: View {
+    let onTap: () -> Void
+
+    var body: some View {
+        Button(action: onTap) {
+            Label("Refine whole day", systemImage: "sparkles")
+                .font(.callout.weight(.semibold))
+                .foregroundStyle(.tint)
+                .padding(.horizontal, 18)
+                .padding(.vertical, 11)
+                .frame(maxWidth: .infinity)
+                .background(.thinMaterial, in: Capsule())
+                .overlay(Capsule().strokeBorder(.tint.opacity(0.25), lineWidth: 0.5))
+        }
+        .buttonStyle(.plain)
     }
 }

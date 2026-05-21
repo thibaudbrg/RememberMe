@@ -11,6 +11,7 @@ struct RememberMeApp: App {
                 .environment(environment)
                 .environment(settings)
                 .task {
+                    environment.pathRefinement.bind(settings: settings)
                     await environment.ensureOpen()
                     #if DEBUG
                     await environment.autoImportSampleIfPresent()

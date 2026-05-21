@@ -8,6 +8,9 @@ public enum Migrations {
     /// Add a new entry whenever `Schema.currentVersion` is bumped.
     public static let steps: [Int32: String] = [
         1: Schema.v1,
+        2: Schema.v2,
+        3: Schema.v3,
+        4: Schema.v4,
     ]
 
     /// Runs whatever upgrades are needed to bring `database` up to `Schema.currentVersion`.

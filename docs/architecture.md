@@ -59,15 +59,23 @@ We pass SQLCipher a raw 32-byte key (`PRAGMA key = "x'<hex>'"`), not a passphras
 ### Schema in one glance
 
 ```
-events       (id PK, kind, start_ts, start_tz_offset_min,
-              end_ts, end_tz_offset_min, source, imported_at)
-activities   (event_id PK→events, start_lat/lon, end_lat/lon, distance_m, mode, probability)
-visits       (event_id PK→events, place_id, lat, lon, semantic_type, hierarchy_level, probability)
-path_points  (event_id+seq PK→events, offset_min, lat, lon)
-places       (place_id PK, user_label, resolved_label, resolved_at, lat, lon)
+events                  (id PK, kind, start_ts, start_tz_offset_min,
+                         end_ts, end_tz_offset_min, source, imported_at)
+activities              (event_id PK→events, start_lat/lon, end_lat/lon, distance_m, mode, probability)
+visits                  (event_id PK→events, place_id, lat, lon, semantic_type, hierarchy_level, probability)
+path_points             (event_id+seq PK→events, offset_min, lat, lon)
+places                  (place_id PK, user_label, resolved_label, resolved_at, lat, lon)
+
+-- schema v2 (alpha: path refinement)
+path_points_original    (event_id+seq PK→events, offset_min, lat, lon)
+path_refinements        (event_id PK→events, refined_at, source, route_name, transport_type,
+                         similarity_*_m, expected_*, candidate_count, chosen_index, *_point_count)
+path_refinement_skips   (event_id PK→events, checked_at, reason)
 ```
 
 `path_points` uses `(event_id, seq)` rather than `(event_id, offset_min)` as PK — real-world Takeout data has multiple GPS samples within the same minute (`offset_min` is rounded), so a unique constraint on it would reject ~5% of paths.
+
+Schema v2 adds the alpha "path refinement" tables: the first time a refinement is applied to a trip, the existing `path_points` rows are copied into `path_points_original` (INSERT OR IGNORE — first apply wins), then `path_points` is overwritten with the chosen candidate route's coordinates. An audit row in `path_refinements` records the similarity score + source. Revert restores from `path_points_original` and drops both the snapshot and the audit row.
 
 ### Real-data sanity check
 
@@ -101,7 +109,18 @@ This isn't free from Foundation, but it's ~100 lines of plain Swift and avoids p
 
 ## Network policy
 
-The app should never make a network call outside of Apple's own SDKs (`MapKit`, `CLGeocoder`, `MKLocalSearch`). Enforcement layers, from outermost in:
+The app should never make a network call outside of Apple's own SDKs (`MapKit`, `CLGeocoder`, `MKLocalSearch`, `MKDirections`) by default.
+
+`MKDirections` is opt-in behind the **Alpha features** Settings toggle (off by default) — it backs the path-refinement debug screen, which asks Apple Maps for the route it would suggest for a recorded trip. Endpoints are rounded to 4 decimals (~11 m) before the request goes out, and only the coarse transport bucket (`walking` / `automobile`) accompanies the call.
+
+`MKDirections` does **not** return transit polylines via its public API — confirmed by Apple DTS in [Apple Developer Forum 663624](https://developer.apple.com/forums/thread/663624). Transit trips are skipped when the Apple provider is selected; we never silently re-route a transit trip as driving.
+
+Within the alpha section, the user can switch the routing provider to **Google Directions API**. That requires:
+- A second, provider-specific disclosure sheet on first selection.
+- A user-pasted API key — the app never ships with one; the build is portable to other users without leaking the developer's billing.
+- An HTTPS call to `maps.googleapis.com/maps/api/directions/json` with rounded endpoints, the coarse mode, and the user's key.
+
+Strict ATS (`NSAllowsArbitraryLoads = NO`) covers both providers — both use TLS. See [PRIVACY.md](../PRIVACY.md#alpha-features-path-refinement) for the per-provider data tables. Enforcement layers, from outermost in:
 
 1. **Info.plist** — `NSAppTransportSecurity.NSAllowsArbitraryLoads = NO`.
 2. **No 3rd-party packages** — only local SwiftPM packages and (eventually) `GRDB.swift/SQLCipher`. CI rejects PRs that add network-capable dependencies.

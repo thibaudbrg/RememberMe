@@ -41,6 +41,12 @@ enum TripStyle {
     /// SF Symbol shown in the timeline row for an activity in this mode.
     static func symbol(for mode: String) -> String {
         let normalized = mode.lowercased()
+        // Bare granular modes (from Google refinement segments) — checked first so
+        // strings like "cable car" don't fall into the loose "car" → car.fill rule.
+        if normalized == "cable car" { return "cablecar.fill" }
+        if normalized == "tram" { return "tram" }
+        if normalized == "driving" { return "car.fill" }
+
         if normalized.contains("walk") { return "figure.walk" }
         if normalized.contains("running") { return "figure.run" }
         if normalized.contains("cycl") || normalized.contains("bicycle") { return "bicycle" }
@@ -60,7 +66,8 @@ enum TripStyle {
         return "arrow.triangle.swap" // unknown trip
     }
 
-    /// Human-readable mode label for chips and rows. Capitalizes Google's verbose strings.
+    /// Human-readable mode label for chips and rows. Capitalizes Google's verbose strings
+    /// and our own granular mode strings from refinement legs.
     static func friendlyLabel(for mode: String) -> String {
         let normalized = mode.lowercased()
         if normalized.contains("in passenger vehicle") { return "Driving" }
@@ -73,6 +80,10 @@ enum TripStyle {
         if normalized.contains("cycling") { return "Cycling" }
         if normalized.contains("motorcycling") { return "Motorcycling" }
         if normalized.contains("flying") { return "Flight" }
+        // Bare granular modes from refinement (no "in " prefix). Capitalized rendering
+        // keeps things consistent ("Bus", "Train", "Subway", "Tram", "Ferry", …).
+        if normalized == "driving" { return "Driving" }
+        if normalized == "transit" { return "Transit" }
         if mode.isEmpty { return "Trip" }
         return mode.capitalized
     }

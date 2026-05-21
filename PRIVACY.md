@@ -26,6 +26,39 @@ Beyond Apple's frameworks: **nothing.** There is no analytics SDK, no crash repo
 
 App Transport Security is set strict in `Info.plist`. Any future code path that tried to make an arbitrary network call would fail to compile or fail at runtime.
 
+### Alpha features: path refinement
+
+There is one opt-in feature, off by default, that issues additional outbound network calls: **path refinement**. Enabling it in Settings → Alpha features lets you ask a routing service for the route it would have suggested for a recorded trip, and replace the noisy GPS samples with that cleaner polyline.
+
+The provider is a separate choice inside the alpha section. Each provider sees different data and has a different trust model. Switching to Google triggers a second, distinct disclosure sheet — flipping the alpha toggle is not consent to use Google.
+
+#### Provider: Apple Maps (default)
+
+| Data | Leaves device? | Mitigation |
+|---|---|---|
+| Trip start and end coordinates | Yes — to Apple Maps via `MKDirections` | Rounded to 4 decimals (~11 m) before the request is built |
+| Transport mode (coarse) | Yes (as `MKDirectionsTransportType`) | Mapped to `.walking` / `.automobile` — Apple's API does **not** return transit polylines, so transit trips are skipped entirely (we never silently re-route them as driving) |
+| Full GPS sample stream | No | Similarity scoring is computed locally |
+| Place IDs, names, labels, dates | No | Never sent |
+| User identity | No | `MKDirections` uses Apple's anonymized routing endpoints — no API key, no Apple ID binding |
+
+#### Provider: Google Maps (requires your own API key)
+
+| Data | Leaves device? | Mitigation |
+|---|---|---|
+| Trip start and end coordinates | Yes — to Google Directions API | Rounded to 4 decimals (~11 m) before the request is built |
+| Transport mode (coarse) | Yes (as Google's `mode` parameter) | One of `walking` / `driving` / `transit` |
+| Your personal Google Directions API key | Yes — on every request | You paste it into Settings; the app never ships with a key. Google attributes usage to your Google Cloud account, not the app developer |
+| Your IP address | Yes — to Google's servers | Inherent in any HTTPS call to a third-party endpoint |
+| Full GPS sample stream | No | Similarity scoring is computed locally |
+| Place IDs, names, labels, dates | No | Never sent |
+
+The Google provider exists specifically because Apple's `MKDirections` does not return transit polylines (confirmed by Apple DTS, [forum thread 663624](https://developer.apple.com/forums/thread/663624)). If you want to refine bus / train / subway trips, you must opt in to Google explicitly and bring your own key.
+
+#### How to revert
+
+Switch the provider picker back to Apple, or turn the alpha toggle off. Previously-refined trips stay refined; each can be reverted individually from the alpha screen.
+
 ## What happens if…
 
 ### …you lose your phone (locked)

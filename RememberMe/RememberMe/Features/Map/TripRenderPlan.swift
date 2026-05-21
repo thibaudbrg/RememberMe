@@ -21,23 +21,39 @@ enum TripRenderPlan {
         let mode: String
     }
 
-    /// Decides which polylines to render for the given day.
-    static func renders(paths: [PathTrace], activities: [TripSummary]) -> [PolylineRender] {
+    /// Decides which polylines to render for the given day. `refinedByActivity` maps an
+    /// activity's id to its refined polyline (one row per activity that has been refined,
+    /// including derived sub-activities from a multi-leg split). When present it takes
+    /// precedence over the time-sliced GPS samples.
+    static func renders(
+        paths: [PathTrace],
+        activities: [TripSummary],
+        refinedByActivity: [UUID: [Coordinate]] = [:]
+    ) -> [PolylineRender] {
         activities.map { activity in
             PolylineRender(
                 id: "trip-\(activity.id.uuidString)",
-                coordinates: coordinates(for: activity, paths: paths),
+                coordinates: coordinates(for: activity, paths: paths, refinedByActivity: refinedByActivity),
                 mode: activity.mode
             )
         }
     }
 
     /// Returns the coordinates that should be drawn for `activity`:
-    ///   - If a path overlaps the activity's window, return the path's GPS samples whose
-    ///     **actual** `offsetMinutes`-derived timestamp falls inside the activity window,
-    ///     bookended by the activity's own start/end so transitions are clean.
+    ///   - If a refinement polyline exists for this activity (single-leg refinement, or
+    ///     a derived leg of a multi-leg split), return it — that's the user's chosen line.
+    ///   - Else if a path overlaps the activity's window, return the path's GPS samples
+    ///     whose **actual** `offsetMinutes`-derived timestamp falls inside the activity
+    ///     window, bookended by the activity's own start/end so transitions are clean.
     ///   - Otherwise fall back to the activity's straight A→B (or a great-circle arc for flights).
-    static func coordinates(for activity: TripSummary, paths: [PathTrace]) -> [Coordinate] {
+    static func coordinates(
+        for activity: TripSummary,
+        paths: [PathTrace],
+        refinedByActivity: [UUID: [Coordinate]] = [:]
+    ) -> [Coordinate] {
+        if let refined = refinedByActivity[activity.id], refined.count >= 2 {
+            return refined
+        }
         if let coveringPath = paths.first(where: { overlapSeconds(path: $0, activity: activity) > 0 }) {
             let activityStartOffsetSec = activity.start.date.timeIntervalSince(coveringPath.start.date)
             let activityEndOffsetSec = activity.end.date.timeIntervalSince(coveringPath.start.date)
@@ -71,8 +87,12 @@ enum TripRenderPlan {
 
     /// Single-source-of-truth for "what does focus on this activity zoom to" — same coordinates
     /// we'd draw on the map, so the camera and the line always agree.
-    static func focusCoordinates(for activity: TripSummary, paths: [PathTrace]) -> [Coordinate] {
-        coordinates(for: activity, paths: paths)
+    static func focusCoordinates(
+        for activity: TripSummary,
+        paths: [PathTrace],
+        refinedByActivity: [UUID: [Coordinate]] = [:]
+    ) -> [Coordinate] {
+        coordinates(for: activity, paths: paths, refinedByActivity: refinedByActivity)
     }
 
     /// Still used by the timeline-tap handler to decide whether a path row is redundant

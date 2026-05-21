@@ -81,6 +81,7 @@ public extension Persistence {
             JOIN events e ON e.id = v.event_id
             LEFT JOIN places p ON p.place_id = v.place_id
             WHERE e.start_ts >= ? AND e.start_ts < ?
+              AND e.is_superseded = 0
             GROUP BY v.place_id
             ORDER BY most_recent DESC
             LIMIT ?;
@@ -118,6 +119,7 @@ public extension Persistence {
             FROM activities a
             JOIN events e ON e.id = a.event_id
             WHERE e.start_ts >= ? AND e.start_ts < ?
+              AND e.is_superseded = 0
             ORDER BY e.start_ts DESC
             LIMIT ?;
         """)
@@ -169,6 +171,7 @@ public extension Persistence {
             LEFT JOIN visits     v ON v.event_id = e.id
             LEFT JOIN places     p ON p.place_id = v.place_id
             WHERE e.start_ts >= ? AND e.start_ts < ?
+              AND e.is_superseded = 0
             ORDER BY e.start_ts ASC
             LIMIT ?;
         """)
@@ -230,6 +233,7 @@ public extension Persistence {
             FROM events
             WHERE kind = 'path'
               AND start_ts >= ? AND start_ts < ?
+              AND is_superseded = 0
             ORDER BY start_ts ASC
             LIMIT ?;
         """)
@@ -298,7 +302,8 @@ public extension Persistence {
         let visitStmt = try database.prepare("""
             SELECT count(*) FROM visits v
             JOIN events e ON e.id = v.event_id
-            WHERE e.start_ts >= ? AND e.start_ts < ?;
+            WHERE e.start_ts >= ? AND e.start_ts < ?
+              AND e.is_superseded = 0;
         """)
         defer { visitStmt.finalize() }
         try visitStmt.bind(1, int64: start)
@@ -315,6 +320,7 @@ public extension Persistence {
             FROM activities a
             JOIN events e ON e.id = a.event_id
             WHERE e.start_ts >= ? AND e.start_ts < ?
+              AND e.is_superseded = 0
             GROUP BY a.mode
             ORDER BY total_distance DESC;
         """)

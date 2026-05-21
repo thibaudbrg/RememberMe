@@ -134,7 +134,7 @@ struct MapScreen: View {
     @MapContentBuilder
     private var tripPolylines: some MapContent {
         ForEach(tripRenders) { render in
-            MapPolyline(coordinates: smoothedCoordinates(render.coordinates))
+            MapPolyline(coordinates: render.coordinates.map(asCLLocationCoordinate))
                 .stroke(settings.accent.color, style: strokeStyle(for: render.mode))
         }
     }
@@ -195,7 +195,11 @@ struct MapScreen: View {
     // MARK: - Polyline rendering
 
     private var tripRenders: [TripRenderPlan.PolylineRender] {
-        TripRenderPlan.renders(paths: environment.dayPathTraces, activities: environment.dayTrips)
+        TripRenderPlan.renders(
+            paths: environment.dayPathTraces,
+            activities: environment.dayTrips,
+            refinedByActivity: environment.dayRefinedPolylines
+        )
     }
 
     /// Sparse direction-of-travel markers along the rendered polylines. We sample a few
@@ -204,13 +208,6 @@ struct MapScreen: View {
         tripRenders.flatMap { render in
             PolylineDirection.markers(for: render.coordinates, polylineID: render.id)
         }
-    }
-
-    /// Chaikin corner-cut version of the polyline. Two passes give a noticeable round-off
-    /// without overshoot — the curve stays strictly inside the original GPS polyline, so
-    /// sharp turns don't develop the spiky overshoot you'd see from a Catmull-Rom spline.
-    private func smoothedCoordinates(_ coords: [Coordinate]) -> [CLLocationCoordinate2D] {
-        PolylineSmoothing.chaikin(coordinates: coords, iterations: 2).map(asCLLocationCoordinate)
     }
 
     private func strokeStyle(for mode: String) -> StrokeStyle {
@@ -267,7 +264,11 @@ struct MapScreen: View {
             guard let trip = environment.dayTrips.first(where: { $0.id == id }) else { return }
             // Slice the covering path's points down to this activity's time window so a short
             // walk inside a 2-hour path zooms to the walk, not to the whole path.
-            let coordinates = TripRenderPlan.focusCoordinates(for: trip, paths: environment.dayPathTraces)
+            let coordinates = TripRenderPlan.focusCoordinates(
+                for: trip,
+                paths: environment.dayPathTraces,
+                refinedByActivity: environment.dayRefinedPolylines
+            )
             let points = coordinates.map(asCLLocationCoordinate)
             if let region = fittedRegion(for: points, minimumSpan: 0.005, screenSize: screenSize) {
                 animateCamera(to: region)

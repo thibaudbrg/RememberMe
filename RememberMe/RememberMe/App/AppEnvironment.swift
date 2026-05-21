@@ -24,6 +24,7 @@ public final class AppEnvironment {
     private let databasePath: String
     private var database: SQLCipherDatabase?
     public private(set) var geocoder: GeocodingService?
+    let pathRefinement: PathRefinementController = PathRefinementController()
 
     public var counts: Persistence.EventCounts = .empty
     public var insights: InsightsSummary = .empty
@@ -62,6 +63,21 @@ public final class AppEnvironment {
     public var dayMarkers: [VisitMarker] = []
     public var dayTrips: [TripSummary] = []
     public var dayPathTraces: [PathTrace] = []
+    /// Per-activity refined polylines for the current day. Populated by `loadDay` from
+    /// `path_points` rows keyed under activity ids — these only exist after a refinement
+    /// (single-leg via `applyRefinement`, or each leg of a multi-leg split). Empty for
+    /// activities that have not been refined; those fall back to time-sliced GPS samples.
+    public var dayRefinedPolylines: [UUID: [Coordinate]] = [:]
+    /// Set of activity event ids for the current day that have been refined (single-trip
+    /// audit row, or derived sub-activity from a multi-leg / journey refinement). Drives
+    /// the small green check shown on the timeline mode icon so the user can scan a day
+    /// at a glance and see which rows have been touched.
+    public var dayRefinedActivityIDs: Set<UUID> = []
+    /// Precomputed multi-leg journeys for the current day, keyed by every activity id
+    /// that participates as a leg. Lets the timeline context-menu look up the journey
+    /// instantly instead of running the detector inside the SwiftUI closure (which
+    /// caused lag and intermittent "missing menu item" bugs).
+    var dayJourneysByAnchor: [UUID: Journey] = [:]
     public var dayTimeline: [TimelineEntry] = []
     public var daySummary: DaySummary = .empty
 
@@ -253,6 +269,7 @@ public final class AppEnvironment {
     public init(keyStore: any KeyStore, databasePath: String) {
         self.keyStore = keyStore
         self.databasePath = databasePath
+        pathRefinement.bind(environment: self)
     }
 
     /// The production environment: real Keychain, real on-disk database under Application Support.
@@ -344,10 +361,35 @@ public final class AppEnvironment {
         guard let database else { return }
         let range = dayRange
         dayMarkers = (try? Persistence.fetchVisitMarkers(in: database, dayRange: range)) ?? []
-        dayTrips = (try? Persistence.fetchTrips(in: database, dayRange: range)) ?? []
+        let rawTrips = (try? Persistence.fetchTrips(in: database, dayRange: range)) ?? []
         dayPathTraces = (try? Persistence.fetchPathTraces(in: database, dayRange: range)) ?? []
-        dayTimeline = (try? Persistence.fetchTimeline(in: database, dayRange: range)) ?? []
+        // Heal trips whose Google metadata is clearly wrong (endpoints + distance that
+        // don't match the path samples). Render-time only — DB is untouched.
+        dayTrips = rawTrips.map { Self.heal(trip: $0, withPaths: dayPathTraces) }
+        dayRefinedPolylines = (try? Persistence.fetchActivityPolylines(in: database, dayRange: range)) ?? [:]
+        dayRefinedActivityIDs = (try? Persistence.fetchRefinedActivityIDs(in: database, dayRange: range)) ?? []
+        let rawTimeline = (try? Persistence.fetchTimeline(in: database, dayRange: range)) ?? []
+        // Apply the same render-time heal to timeline rows so the "13.8 km" label on
+        // a corrupted Google activity matches the corrected distance on the trip detail
+        // screen + the polyline on the map.
+        let tripsByID = Dictionary(uniqueKeysWithValues: dayTrips.map { ($0.id, $0) })
+        dayTimeline = rawTimeline.map { entry in
+            guard entry.kind == "activity",
+                  case let .activity(_, mode) = entry.detail,
+                  let healed = tripsByID[entry.id]
+            else {
+                return entry
+            }
+            return TimelineEntry(
+                id: entry.id,
+                kind: entry.kind,
+                start: entry.start,
+                end: entry.end,
+                detail: .activity(distanceMeters: healed.distanceMeters, mode: mode)
+            )
+        }
         daySummary = (try? Persistence.fetchDaySummary(in: database, dayRange: range)) ?? .empty
+        dayJourneysByAnchor = precomputeJourneys(trips: dayTrips, timeline: dayTimeline)
         // dayPhotos is loaded separately by MapScreen when its toggle is on (we don't want
         // to ask for Photos access from this layer; the view decides when).
     }
@@ -650,6 +692,179 @@ public final class AppEnvironment {
         let points = (try? Persistence.fetchPathPoints(in: database, eventID: trip.id)) ?? []
         return points.isEmpty ? [trip.startCoordinate, trip.endCoordinate] : points
     }
+
+    /// Builds a map from every activity id to its multi-leg journey (if any), so the
+    /// timeline context menu can look up "is this part of a journey?" in O(1). Same
+    /// detector logic as before, just memoized — avoids the SwiftUI closure-evaluation
+    /// lag that intermittently hid the "Refine whole journey" menu item.
+    private func precomputeJourneys(
+        trips: [TripSummary],
+        timeline: [TimelineEntry]
+    ) -> [UUID: Journey] {
+        var byAnchor: [UUID: Journey] = [:]
+        for trip in trips {
+            guard byAnchor[trip.id] == nil else { continue }
+            if let journey = JourneyDetector.detect(around: trip, in: timeline, dayTrips: trips),
+               journey.isMultiLeg
+            {
+                // Every leg of the same journey points at the same Journey instance, so
+                // long-pressing A, B, or C surfaces an identical menu.
+                for memberTrip in journey.trips {
+                    byAnchor[memberTrip.id] = journey
+                }
+            }
+        }
+        return byAnchor
+    }
+
+    /// Path points for an event by ID. Returns an empty array when none are recorded.
+    /// Used by the refinement screen which doesn't have a `TripSummary` start/end fallback.
+    public func recordedPath(forEventID eventID: UUID) -> [Coordinate] {
+        guard let database else { return [] }
+        return (try? Persistence.fetchPathPoints(in: database, eventID: eventID)) ?? []
+    }
+
+    /// Recorded GPS samples for `trip`, sliced from the day's `path` events by time
+    /// overlap — same logic the main `TripRenderPlan` uses to draw the trip line on
+    /// the map. Activities and paths are separate events in this codebase; samples are
+    /// keyed by the *path* event's id, not the activity's, so the naive lookup in
+    /// `recordedPath(forEventID:)` returns empty for most trips.
+    public func recordedSamples(forTrip trip: TripSummary) -> [Coordinate] {
+        guard let coveringPath = dayPathTraces.first(where: { overlap(path: $0, trip: trip) > 0 }) else {
+            return []
+        }
+        let activityStartOffsetSec = trip.start.date.timeIntervalSince(coveringPath.start.date)
+        let activityEndOffsetSec = trip.end.date.timeIntervalSince(coveringPath.start.date)
+        return coveringPath.samples.compactMap { sample in
+            let offsetSec = TimeInterval(sample.offsetMinutes * 60)
+            guard offsetSec >= activityStartOffsetSec, offsetSec <= activityEndOffsetSec else { return nil }
+            return sample.coordinate
+        }
+    }
+
+    private func overlap(path: PathTrace, trip: TripSummary) -> TimeInterval {
+        let latestStart = max(path.start.date, trip.start.date)
+        let earliestEnd = min(path.end.date, trip.end.date)
+        return max(0, earliestEnd.timeIntervalSince(latestStart))
+    }
+
+    /// Mismatch threshold for the heal heuristic. When Google's recorded
+    /// `startCoordinate` / `endCoordinate` is more than this far from the covering
+    /// path event's first/last in-window sample, we treat Google's metadata as broken
+    /// and substitute the path samples.
+    private static let healMismatchThresholdMeters: Double = 1_500
+
+    /// True when `googleEnd` lies plausibly further along the path's direction of
+    /// travel than `pathEnd`. Used to decide whether to keep Google's stored end
+    /// (sparse GPS samples stop partway) or heal it (Google's metadata is broken).
+    ///
+    /// Two checks:
+    ///   1. Google's end is at least 10% further from path start than the last sample.
+    ///   2. The bearing from path start to Google's end is within 60° of the bearing
+    ///      from path start to path end.
+    /// Short paths (under 100 m of sample span) default to trusting Google's end.
+    private static func googleEndIsPlausiblyFurther(
+        googleEnd: Coordinate,
+        pathStart: Coordinate,
+        pathEnd: Coordinate
+    ) -> Bool {
+        let firstToLast = PolylineDirection.haversineMeters(pathStart, pathEnd)
+        let firstToGoogle = PolylineDirection.haversineMeters(pathStart, googleEnd)
+        guard firstToLast >= 100 else { return true }
+        guard firstToGoogle > firstToLast * 1.1 else { return false }
+
+        let pathBearing = PolylineDirection.bearingDegrees(from: pathStart, to: pathEnd)
+        let endBearing = PolylineDirection.bearingDegrees(from: pathStart, to: googleEnd)
+        let rawDiff = abs(pathBearing - endBearing).truncatingRemainder(dividingBy: 360)
+        let shortest = min(rawDiff, 360 - rawDiff)
+        return shortest < 60
+    }
+
+    /// Returns a TripSummary patched in-memory when Google's stored start/end/distance
+    /// don't agree with the covering path event's GPS samples. Render-time only — the
+    /// DB row is unchanged, so a fresh re-import re-heals from the same source data.
+    ///
+    /// Each endpoint is healed *independently* — only the start or only the end may be
+    /// off, so we never replace a good endpoint with a sparse last-sample value just
+    /// because the *other* endpoint was bad. Distance becomes the max of Google's
+    /// stored distance, the polyline sample-sum, and the crow-flies between the
+    /// (possibly partly-healed) endpoints.
+    static func heal(trip: TripSummary, withPaths paths: [PathTrace]) -> TripSummary {
+        // Find a covering path event by time overlap.
+        guard let coveringPath = paths.first(where: { covering in
+            let latestStart = max(covering.start.date, trip.start.date)
+            let earliestEnd = min(covering.end.date, trip.end.date)
+            return earliestEnd > latestStart
+        }) else {
+            return trip
+        }
+
+        // Slice the path's samples to the trip's time window.
+        let activityStartOffsetSec = trip.start.date.timeIntervalSince(coveringPath.start.date)
+        let activityEndOffsetSec = trip.end.date.timeIntervalSince(coveringPath.start.date)
+        let sliced = coveringPath.samples.filter { sample in
+            let offsetSec = TimeInterval(sample.offsetMinutes * 60)
+            return offsetSec >= activityStartOffsetSec && offsetSec <= activityEndOffsetSec
+        }
+        guard let first = sliced.first?.coordinate, let last = sliced.last?.coordinate else {
+            return trip
+        }
+
+        let startMismatch = PolylineDirection.haversineMeters(trip.startCoordinate, first)
+        let endMismatch = PolylineDirection.haversineMeters(trip.endCoordinate, last)
+        let healStart = startMismatch > Self.healMismatchThresholdMeters
+        // For the end: even when it's far from the last sample, Google's stored end may
+        // still be the real destination — the GPS samples are often sparse and stop
+        // partway. Only heal it when Google's end is NOT plausibly further along the
+        // path's direction of travel.
+        let healEnd: Bool = {
+            guard endMismatch > Self.healMismatchThresholdMeters else { return false }
+            return !Self.googleEndIsPlausiblyFurther(
+                googleEnd: trip.endCoordinate,
+                pathStart: first,
+                pathEnd: last
+            )
+        }()
+        guard healStart || healEnd else { return trip }
+
+        let newStart = healStart ? first : trip.startCoordinate
+        let newEnd = healEnd ? last : trip.endCoordinate
+
+        // Distance: largest of (Google's stored value, sample-polyline sum, crow-flies
+        // between the resulting endpoints). For the canonical broken case (start healed,
+        // end kept), the crow-flies term recovers most of the real journey length even
+        // though the polyline only covers the sampled portion.
+        var polylineDistance: Double = 0
+        var prev = first
+        for sample in sliced.dropFirst() {
+            polylineDistance += PolylineDirection.haversineMeters(prev, sample.coordinate)
+            prev = sample.coordinate
+        }
+        let crowFlies = PolylineDirection.haversineMeters(newStart, newEnd)
+        let healedDistance = max(trip.distanceMeters, polylineDistance, crowFlies)
+
+        return TripSummary(
+            id: trip.id,
+            start: trip.start,
+            end: trip.end,
+            startCoordinate: newStart,
+            endCoordinate: newEnd,
+            distanceMeters: healedDistance,
+            mode: trip.mode
+        )
+    }
+
+    /// Original GPS samples for a refined event (empty if the event has never been refined).
+    /// After a refinement, `recordedPath` returns the refined polyline and this returns the
+    /// pre-refinement samples — both are needed to show the before/after diff.
+    public func originalPath(forEventID eventID: UUID) -> [Coordinate] {
+        guard let database else { return [] }
+        return (try? Persistence.fetchOriginalPathPoints(in: database, eventID: eventID)) ?? []
+    }
+
+    /// Internal escape hatch for in-process feature controllers that need to do their own
+    /// DB writes (e.g. `PathRefinementController`). Returns nil if the DB isn't open yet.
+    func openDatabase() -> SQLCipherDatabase? { database }
 
     // MARK: - Debug-only auto-import
 

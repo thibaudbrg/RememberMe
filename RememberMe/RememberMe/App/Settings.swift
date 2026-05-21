@@ -11,6 +11,11 @@ public final class Settings {
     static let arrowsKey = "settings.showDirectionArrows"
     static let biometricKey = "settings.biometricLock"
     static let photosKey = "settings.showPhotosOnMap"
+    static let alphaEnabledKey = "settings.alphaModeEnabled"
+    static let alphaAcknowledgedKey = "settings.alphaModeAcknowledged"
+    static let refinementProviderKey = "settings.refinementProvider"
+    static let googleAckKey = "settings.googleRoutingAcknowledged"
+    static let googleAPIKeyKey = "settings.googleDirectionsAPIKey"
 
     public var theme: AppTheme {
         didSet { UserDefaults.standard.set(theme.rawValue, forKey: Self.themeKey) }
@@ -39,6 +44,39 @@ public final class Settings {
         didSet { UserDefaults.standard.set(showPhotosOnMap, forKey: Self.photosKey) }
     }
 
+    /// Opt-in for the alpha-features bucket (currently: path refinement via Apple Maps).
+    /// Off by default. Flipping ON for the first time triggers a one-shot disclosure sheet
+    /// that explains what leaves the device.
+    public var alphaModeEnabled: Bool {
+        didSet { UserDefaults.standard.set(alphaModeEnabled, forKey: Self.alphaEnabledKey) }
+    }
+
+    /// True once the user has seen and accepted the alpha-mode disclosure sheet. Persisted
+    /// so the disclosure only appears on first enable.
+    public var alphaModeAcknowledged: Bool {
+        didSet { UserDefaults.standard.set(alphaModeAcknowledged, forKey: Self.alphaAcknowledgedKey) }
+    }
+
+    /// Which third-party routing source the alpha screen uses. Apple Maps is the default;
+    /// switching to Google Maps requires a separate user-entered API key and triggers a
+    /// distinct disclosure sheet because Google receives the requests instead of Apple.
+    public var refinementProvider: RefinementProvider {
+        didSet { UserDefaults.standard.set(refinementProvider.rawValue, forKey: Self.refinementProviderKey) }
+    }
+
+    /// True once the user has accepted the Google-specific disclosure. Separate from
+    /// `alphaModeAcknowledged` so flipping back to Google later doesn't reuse the Apple
+    /// consent.
+    public var googleRoutingAcknowledged: Bool {
+        didSet { UserDefaults.standard.set(googleRoutingAcknowledged, forKey: Self.googleAckKey) }
+    }
+
+    /// User-pasted Google Directions API key. Stored locally; never embedded in the
+    /// binary. If empty, the Google provider can't run and the UI must prompt the user.
+    public var googleDirectionsAPIKey: String {
+        didSet { UserDefaults.standard.set(googleDirectionsAPIKey, forKey: Self.googleAPIKeyKey) }
+    }
+
     public init() {
         let themeRaw = UserDefaults.standard.string(forKey: Self.themeKey) ?? AppTheme.auto.rawValue
         theme = AppTheme(rawValue: themeRaw) ?? .auto
@@ -57,6 +95,34 @@ public final class Settings {
 
         // Default OFF — photo library access is a meaningful permission ask.
         showPhotosOnMap = UserDefaults.standard.bool(forKey: Self.photosKey)
+
+        // Default OFF — alpha-mode opens outbound Apple Maps calls; user opt-in only.
+        alphaModeEnabled = UserDefaults.standard.bool(forKey: Self.alphaEnabledKey)
+        alphaModeAcknowledged = UserDefaults.standard.bool(forKey: Self.alphaAcknowledgedKey)
+
+        // Default to Apple Maps — the lower-leak option of the two.
+        let providerRaw = UserDefaults.standard.string(forKey: Self.refinementProviderKey) ?? RefinementProvider.apple.rawValue
+        refinementProvider = RefinementProvider(rawValue: providerRaw) ?? .apple
+        googleRoutingAcknowledged = UserDefaults.standard.bool(forKey: Self.googleAckKey)
+        googleDirectionsAPIKey = UserDefaults.standard.string(forKey: Self.googleAPIKeyKey) ?? ""
+    }
+}
+
+/// Which third-party routing service the path-refinement screen calls.
+public enum RefinementProvider: String, CaseIterable, Identifiable, Sendable {
+    /// Apple Maps via `MKDirections`. Anonymized endpoints, no API key — but does not
+    /// return transit polylines.
+    case apple
+    /// Google Directions API. Requires a user-entered API key. Supports transit.
+    case google
+
+    public var id: String { rawValue }
+
+    public var label: String {
+        switch self {
+        case .apple: "Apple Maps"
+        case .google: "Google Maps"
+        }
     }
 }
 
