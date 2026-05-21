@@ -17,8 +17,16 @@ setup:
 	@command -v swiftlint   >/dev/null 2>&1 || echo "(optional) brew install swiftlint"
 
 lint:
-	@command -v swiftformat >/dev/null 2>&1 && swiftformat --lint . || echo "swiftformat not installed, skipping"
-	@command -v swiftlint   >/dev/null 2>&1 && swiftlint            || echo "swiftlint not installed, skipping"
+	@if command -v swiftformat >/dev/null 2>&1; then \
+		swiftformat --lint .; \
+	else \
+		echo "swiftformat not installed, skipping"; \
+	fi
+	@if command -v swiftlint >/dev/null 2>&1; then \
+		swiftlint; \
+	else \
+		echo "swiftlint not installed, skipping"; \
+	fi
 
 test:
 	swift test --package-path Packages/Core

@@ -4,9 +4,10 @@
 --wraparguments before-first
 --wrapparameters before-first
 --wrapcollections before-first
---commas inline
+--commas always
 --semicolons never
 --self remove
 --trimwhitespace always
 --ifdef no-indent
+--importgrouping testable-bottom
 --exclude .build,DerivedData,sample-data,Packages/**/.build,**/Generated
