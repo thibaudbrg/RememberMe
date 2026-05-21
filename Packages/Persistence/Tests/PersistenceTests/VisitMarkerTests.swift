@@ -46,8 +46,16 @@ final class VisitMarkerTests: XCTestCase {
         )
 
         let visits = (0 ..< 50).map { index in
-            let ts = TimestampedLocal(date: Date(timeIntervalSince1970: TimeInterval(1_700_000_000 + index)), tzOffsetMinutes: 0)
-            return makeVisit(placeID: "place-\(index)", at: Coordinate(latitude: Double(index), longitude: 0), start: ts, end: ts)
+            let ts = TimestampedLocal(
+                date: Date(timeIntervalSince1970: TimeInterval(1_700_000_000 + index)),
+                tzOffsetMinutes: 0
+            )
+            return makeVisit(
+                placeID: "place-\(index)",
+                at: Coordinate(latitude: Double(index), longitude: 0),
+                start: ts,
+                end: ts
+            )
         }
         try EventWriter(database: database).write(visits)
 

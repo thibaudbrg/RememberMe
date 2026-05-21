@@ -41,16 +41,19 @@ public final class KeychainKeyStore: KeyStore, @unchecked Sendable {
     // MARK: - Internals
 
     private func baseQuery() -> [String: Any] {
-        [
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
             kSecAttrSynchronizable as String: false,
-            // Force the modern Data Protection Keychain. On macOS this is required; on iOS this
-            // is the default but being explicit avoids the simulator falling back to a legacy
-            // path that wants `keychain-access-groups` entitlements.
-            kSecUseDataProtectionKeychain as String: true,
         ]
+        // On iOS, opting into the Data Protection Keychain avoids the simulator falling back to
+        // a legacy code path that wants `keychain-access-groups` entitlements. On macOS this
+        // setting forces the iOS-style keychain, which CLI tests (no entitlements) can't access.
+        #if os(iOS)
+        query[kSecUseDataProtectionKeychain as String] = true
+        #endif
+        return query
     }
 
     private func fetchKey() throws -> DatabaseKey? {

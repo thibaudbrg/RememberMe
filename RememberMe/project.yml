@@ -58,6 +58,7 @@ targets:
           - UIInterfaceOrientationLandscapeRight
         NSLocationWhenInUseUsageDescription: "RememberMe centers the map on your current location. Your location is never sent anywhere."
         NSFaceIDUsageDescription: "RememberMe uses Face ID to unlock your history when you enable the optional app lock."
+        NSPhotoLibraryUsageDescription: "RememberMe overlays photos taken at the places you visited that day. Photos stay on your device — nothing is uploaded."
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: false
         UIFileSharingEnabled: true

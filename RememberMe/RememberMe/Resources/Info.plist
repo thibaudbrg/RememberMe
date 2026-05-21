@@ -33,6 +33,8 @@
 	<string>RememberMe uses Face ID to unlock your history when you enable the optional app lock.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>RememberMe centers the map on your current location. Your location is never sent anywhere.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>RememberMe overlays photos taken at the places you visited that day. Photos stay on your device — nothing is uploaded.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

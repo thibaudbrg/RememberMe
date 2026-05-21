@@ -45,7 +45,9 @@ public enum KeyStoreError: Error, Equatable, LocalizedError, CustomStringConvert
         }
     }
 
-    public var errorDescription: String? { description }
+    public var errorDescription: String? {
+        description
+    }
 }
 
 /// Abstraction over "give me the DB key, generating a fresh one on first call".

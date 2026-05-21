@@ -8,6 +8,9 @@ excluded:
 disabled_rules:
   - todo
   - trailing_comma
+  # swiftformat wraps long conditions with `{` on its own line; swiftlint hates that. We
+  # treat swiftformat as the canonical formatter, so silence the lint warning.
+  - opening_brace
 
 opt_in_rules:
   - empty_count
@@ -59,3 +62,4 @@ identifier_name:
     - v
     - v1
     - SQLITE_TRANSIENT
+    - fm
