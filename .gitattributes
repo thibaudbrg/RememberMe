@@ -1,0 +1,18 @@
+* text=auto eol=lf
+
+# Treat these as binary so git doesn't try to munge them.
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.heic      binary
+*.HEIC      binary
+*.pdf       binary
+*.sqlite    binary
+*.sqlite-shm binary
+*.sqlite-wal binary
+*.db        binary
+*.bin       binary
+
+# Pin Xcode project metadata to LF — merge tools handle it better.
+*.pbxproj   text eol=lf merge=union
+*.xcconfig  text eol=lf

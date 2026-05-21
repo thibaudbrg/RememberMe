@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# RememberMe pre-commit guard.
+# Rejects commits that try to add real personal data, encrypted DB files, or local secrets.
+# Install with: git config core.hooksPath .githooks  (handled by `make setup`)
+#
+# Uses bash regex (not PCRE) — works the same on macOS BSD grep and Linux GNU grep.
+
+set -euo pipefail
+
+PATTERNS=(
+    '(\.sqlite(-shm|-wal)?|\.db(-shm|-wal)?)$'
+    '^location-history.*\.json$'
+    '\.takeout\.zip$'
+    '\.(heic|HEIC)$'
+    '^Timeline.*\.json$'
+    '^Config\.xcconfig$'
+    '\.(mobileprovision|p12|pem)$'
+)
+DESCRIPTIONS=(
+    'SQLite/DB file'
+    'Google Takeout location history'
+    'Google Takeout archive'
+    'HEIC photo'
+    'Google Timeline JSON'
+    'developer-local build config'
+    'signing/credential material'
+)
+
+mapfile -t staged < <(git diff --cached --name-only --diff-filter=ACMR)
+[[ ${#staged[@]} -eq 0 ]] && exit 0
+
+violations=()
+for path in "${staged[@]}"; do
+    [[ -z "$path" ]] && continue
+
+    if [[ "$path" == sample-data/* && "$path" != "sample-data/README.md" ]]; then
+        violations+=("$path  (under sample-data/)")
+        continue
+    fi
+
+    for i in "${!PATTERNS[@]}"; do
+        pat="${PATTERNS[$i]}"
+        desc="${DESCRIPTIONS[$i]}"
+        if [[ "$path" =~ $pat ]]; then
+            violations+=("$path  ($desc)")
+        fi
+    done
+done
+
+if (( ${#violations[@]} > 0 )); then
+    echo "✗ pre-commit: refusing to commit privacy-sensitive paths:"
+    printf '    %s\n' "${violations[@]}"
+    echo
+    echo "  These patterns are blocked because they typically contain real personal data,"
+    echo "  encrypted database files, or local signing material. If this is a false positive,"
+    echo "  edit .githooks/pre-commit and add an exception (and update .gitignore + CI to match)."
+    exit 1
+fi
+
+exit 0

@@ -1,0 +1,12 @@
+--swiftversion 5.10
+--indent 4
+--maxwidth 120
+--wraparguments before-first
+--wrapparameters before-first
+--wrapcollections before-first
+--commas inline
+--semicolons never
+--self remove
+--trimwhitespace always
+--ifdef no-indent
+--exclude .build,DerivedData,sample-data,Packages/**/.build,**/Generated

@@ -1,0 +1,103 @@
+name: RememberMe
+options:
+  bundleIdPrefix: com.tibo.rememberme
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+  groupSortPosition: top
+
+configs:
+  Debug: debug
+  Release: release
+
+settings:
+  base:
+    SWIFT_VERSION: "5.10"
+    IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    SWIFT_STRICT_CONCURRENCY: complete
+  configs:
+    Debug:
+      SWIFT_ACTIVE_COMPILATION_CONDITIONS: "DEBUG"
+      SWIFT_OPTIMIZATION_LEVEL: "-Onone"
+    Release:
+      SWIFT_OPTIMIZATION_LEVEL: "-O"
+      SWIFT_COMPILATION_MODE: wholemodule
+
+packages:
+  Core:
+    path: ../Packages/Core
+  Persistence:
+    path: ../Packages/Persistence
+
+targets:
+  RememberMe:
+    type: application
+    platform: iOS
+    sources:
+      - path: RememberMe
+    resources:
+      - path: RememberMe/Resources/Assets.xcassets
+    info:
+      path: RememberMe/Resources/Info.plist
+      properties:
+        CFBundleDisplayName: RememberMe
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+        LSRequiresIPhoneOS: true
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        NSLocationWhenInUseUsageDescription: "RememberMe centers the map on your current location. Your location is never sent anywhere."
+        NSFaceIDUsageDescription: "RememberMe uses Face ID to unlock your history when you enable the optional app lock."
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: false
+    dependencies:
+      - package: Core
+      - package: Persistence
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.tibo.rememberme
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SUPPORTS_MACCATALYST: NO
+        SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
+        GENERATE_INFOPLIST_FILE: NO
+
+  RememberMeTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: RememberMeTests
+    dependencies:
+      - target: RememberMe
+    settings:
+      base:
+        BUNDLE_LOADER: $(TEST_HOST)
+        TEST_HOST: $(BUILT_PRODUCTS_DIR)/RememberMe.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/RememberMe
+
+schemes:
+  RememberMe:
+    build:
+      targets:
+        RememberMe: all
+    test:
+      targets:
+        - RememberMeTests
+    run:
+      config: Debug
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release

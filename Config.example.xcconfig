@@ -1,0 +1,21 @@
+// RememberMe — developer-local build configuration.
+// Copy to Config.xcconfig (gitignored) and adjust.
+//
+// There are NO secrets here. The app has no server, no API keys, no third-party SDKs.
+// Runtime crypto keys live in the iOS Keychain.
+
+PRODUCT_BUNDLE_IDENTIFIER = com.tibo.rememberme.dev
+DEVELOPMENT_TEAM =                  // your Apple team id, local only
+MARKETING_VERSION = 0.1.0
+CURRENT_PROJECT_VERSION = 1
+
+IPHONEOS_DEPLOYMENT_TARGET = 17.0
+SWIFT_VERSION = 5.10
+
+// Feature flags (compile-time, opt-in by appending to ACTIVE_COMPILATION_CONDITIONS)
+//   DEBUG_PANEL       — internal overlays (dev builds only)
+//   VERBOSE_LOGGING   — log full coordinate precision (DEV ONLY, NEVER ship)
+SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited)
+
+// Strict App Transport Security — no exceptions.
+INFOPLIST_KEY_NSAppTransportSecurity_NSAllowsArbitraryLoads = NO

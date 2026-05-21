@@ -1,0 +1,51 @@
+[
+  {
+    "startTime" : "2024-01-15T08:00:00.000+00:00",
+    "endTime" : "2024-01-15T09:00:00.000+00:00",
+    "activity" : {
+      "start" : "geo:0.000000,0.000000",
+      "end" : "geo:0.010000,0.010000",
+      "distanceMeters" : "1572.000000",
+      "topCandidate" : {
+        "type" : "walking",
+        "probability" : "0.900000"
+      }
+    }
+  },
+  {
+    "startTime" : "2024-01-15T09:00:00.000+00:00",
+    "endTime" : "2024-01-15T17:00:00.000+00:00",
+    "visit" : {
+      "hierarchyLevel" : "0",
+      "probability" : "0.950000",
+      "topCandidate" : {
+        "placeID" : "FIXTURE_PLACE_ALPHA",
+        "placeLocation" : "geo:0.010000,0.010000",
+        "semanticType" : "Work",
+        "probability" : "0.900000"
+      }
+    }
+  },
+  {
+    "startTime" : "2024-01-15T17:00:00.000+00:00",
+    "endTime" : "2024-01-15T17:30:00.000+00:00",
+    "timelinePath" : [
+      {
+        "point" : "geo:0.010000,0.010000",
+        "durationMinutesOffsetFromStartTime" : "0"
+      },
+      {
+        "point" : "geo:0.012000,0.011000",
+        "durationMinutesOffsetFromStartTime" : "10"
+      },
+      {
+        "point" : "geo:0.015000,0.013000",
+        "durationMinutesOffsetFromStartTime" : "20"
+      },
+      {
+        "point" : "geo:0.020000,0.020000",
+        "durationMinutesOffsetFromStartTime" : "30"
+      }
+    ]
+  }
+]
