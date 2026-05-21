@@ -36,9 +36,9 @@ An earlier draft of the plan called for four packages (`Core`, `Crypto`, `Import
 - A future web app would share **schemas** (in `docs/data-formats/`) with this codebase, not Swift code — so the speculative "web-shareability" benefit of splitting `Core` further was unreal.
 - We can always split further when `Core` grows past ~2k LOC.
 
-## Why GRDB + SQLCipher and not Core Data
+## Why SQLCipher directly (and not GRDB or Core Data)
 
-We considered three storage stacks:
+We considered four storage stacks:
 
 1. **Core Data** with `NSPersistentStoreFileProtectionKey = .complete`.
    File-level protection only — when the device is unlocked, the file is plaintext on disk. The threat we care about (forensic readout of an unlocked, backgrounded app) is not covered.
@@ -46,11 +46,40 @@ We considered three storage stacks:
 2. **CryptoKit-encrypted blob files** (one big AES-GCM blob per "day" of events).
    Encryption ✅, but no query layer. Filtering visits by date range, joining to places, paginating a timeline — all become custom code over deserialized blobs. Doesn't scale.
 
-3. **GRDB + SQLCipher** *(chosen)*.
-   Page-level AES-256-CBC + HMAC-SHA512. Full SQL. Native Swift bindings.
-   Cost: a C dependency (SQLCipher is a SQLite fork). SwiftPM integration is straightforward via the `GRDB.swift/SQLCipher` product.
+3. **GRDB.swift + SQLCipher** (the original plan).
+   Full GRDB API + page-level AES-256-CBC encryption. The problem: GRDB's official SwiftPM `Package.swift` ships the SQLCipher integration as **commented-out lines** that the consumer must un-comment by forking. Community forks (DuckDuckGo's) ship as opaque precompiled xcframeworks that bundle both GRDB and SQLCipher together — auditable but indirect. Neither is a clean SwiftPM-consumer experience.
+
+4. **`sqlcipher/SQLCipher.swift` directly + a thin Swift wrapper** *(chosen)*.
+   The official SwiftPM package from the SQLCipher maintainers (Zetetic LLC) ships SQLCipher as a precompiled xcframework with `SQLITE_HAS_CODEC` enabled. We layer ~250 lines of audited Swift on top (`SQLCipherDatabase`, `PreparedStatement`, `Schema`, `Migrations`, `EventWriter`) for the operations the app actually needs.
+
+**Why we picked #4 over #3**: less supply-chain (one upstream maintainer instead of two), tighter audit surface (a privacy-paranoid user can read the entire DB layer in one sitting), no fragile fork dependency. The tradeoff is that we don't get GRDB's nice observation API for free — if/when we need it, we can either revisit GRDB once their SwiftPM SQLCipher story improves, or grow our wrapper.
 
 We pass SQLCipher a raw 32-byte key (`PRAGMA key = "x'<hex>'"`), not a passphrase. The key comes from `SecRandomCopyBytes` and lives in the Keychain. See [SECURITY.md](../SECURITY.md) for the full crypto spec.
+
+### Schema in one glance
+
+```
+events       (id PK, kind, start_ts, start_tz_offset_min,
+              end_ts, end_tz_offset_min, source, imported_at)
+activities   (event_id PK→events, start_lat/lon, end_lat/lon, distance_m, mode, probability)
+visits       (event_id PK→events, place_id, lat, lon, semantic_type, hierarchy_level, probability)
+path_points  (event_id+seq PK→events, offset_min, lat, lon)
+places       (place_id PK, user_label, resolved_label, resolved_at, lat, lon)
+```
+
+`path_points` uses `(event_id, seq)` rather than `(event_id, offset_min)` as PK — real-world Takeout data has multiple GPS samples within the same minute (`offset_min` is rounded), so a unique constraint on it would reject ~5% of paths.
+
+### Real-data sanity check
+
+The `EndToEndImportTests` test wires the entire pipeline: decode the user's actual 11MB Takeout → write into an encrypted DB → query counts. On a 2024 M-series MacBook the timings are:
+
+| Step                              | Time     |
+|-----------------------------------|----------|
+| Decode 16,732 events from JSON    | ~4.6s    |
+| Insert into encrypted SQLite      | ~0.19s   |
+| Total                             | ~4.8s    |
+
+Encryption is essentially free at this scale.
 
 ## Why iOS 17 minimum
 

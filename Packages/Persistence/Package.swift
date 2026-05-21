@@ -12,14 +12,14 @@ let package = Package(
     ],
     dependencies: [
         .package(path: "../Core"),
-        // GRDB + SQLCipher will be added when the schema lands. Pinned then for reproducibility.
-        // .package(url: "https://github.com/groue/GRDB.swift", from: "6.29.0"),
+        .package(url: "https://github.com/sqlcipher/sqlcipher.swift", from: "4.10.0"),
     ],
     targets: [
         .target(
             name: "Persistence",
             dependencies: [
                 .product(name: "Core", package: "Core"),
+                .product(name: "SQLCipher", package: "sqlcipher.swift"),
             ],
             path: "Sources/Persistence"
         ),

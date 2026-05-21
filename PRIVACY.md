@@ -72,4 +72,4 @@ The repo is open. To verify our claims:
 - The `.xcconfig` enforces `NSAppTransportSecurity_NSAllowsArbitraryLoads = NO`.
 - There are zero third-party Swift package dependencies that perform network I/O. Run `swift package show-dependencies --package-path Packages/Core` and `Packages/Persistence`.
 - `grep -R "URLSession\|NSURLConnection" RememberMe/ Packages/` shows every network call site in the app. There should be none outside of `MKLocalSearch` / `CLGeocoder` adapter code.
-- Database encryption will be exercised by the test suite once GRDB+SQLCipher lands: `swift test --package-path Packages/Persistence` is intended to open an encrypted DB and assert the file is unreadable without the key. Until that commit lands, the only test in Persistence is a placeholder.
+- Database encryption is exercised by the test suite: `swift test --package-path Packages/Persistence` opens an encrypted DB, writes a row, closes it, and asserts (a) the raw bytes on disk do **not** start with the SQLite magic header `"SQLite format 3\0"` and (b) reopening with a different random key is rejected. See `Packages/Persistence/Tests/PersistenceTests/EncryptionSmokeTests.swift`.

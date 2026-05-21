@@ -60,6 +60,8 @@ targets:
         NSFaceIDUsageDescription: "RememberMe uses Face ID to unlock your history when you enable the optional app lock."
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: false
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
     dependencies:
       - package: Core
       - package: Persistence
@@ -72,6 +74,7 @@ targets:
         SUPPORTS_MACCATALYST: NO
         SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
         GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGN_ENTITLEMENTS: RememberMe/Resources/RememberMe.entitlements
 
   RememberMeTests:
     type: bundle.unit-test

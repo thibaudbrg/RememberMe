@@ -23,15 +23,15 @@ Out of scope (also in [PRIVACY.md](PRIVACY.md), enumerated here for completeness
 
 | Property                       | Value                                                                             |
 |--------------------------------|-----------------------------------------------------------------------------------|
-| Engine                         | SQLCipher, integrated via `GRDB.swift/SQLCipher` SwiftPM product                  |
+| Engine                         | SQLCipher via the official [`sqlcipher/SQLCipher.swift`](https://github.com/sqlcipher/SQLCipher.swift) SwiftPM package, wrapped by ~250 lines of audited Swift in `Packages/Persistence/Sources/Persistence/SQLCipherDatabase.swift` |
 | Cipher                         | AES-256-CBC, page-level (SQLCipher default for v4)                                |
 | Auth                           | HMAC-SHA512 per page                                                              |
 | KDF inside SQLCipher           | Disabled effectively — we pass a raw 256-bit key, not a passphrase               |
 | Key passing                    | `PRAGMA key = "x'<64 hex chars>'"` (raw key form). We do **not** use the passphrase form |
 | Key length                     | 32 bytes (256 bits)                                                               |
-| Key source                     | `SecRandomCopyBytes` on first launch                                              |
-| File protection                | `NSFileProtectionComplete`                                                        |
-| Backup exclusion               | `URLResourceValues.isExcludedFromBackup = true` at file-create time              |
+| Key source                     | `SecRandomCopyBytes` on first launch (`Packages/Core/.../SecureRandom.swift`)     |
+| File protection                | `NSFileProtectionComplete` (applied by the app target when it constructs the URL) |
+| Backup exclusion               | `URLResourceValues.isExcludedFromBackup = true` set by `DatabaseFactory.open(at:)` |
 
 ### Why raw key, not passphrase
 

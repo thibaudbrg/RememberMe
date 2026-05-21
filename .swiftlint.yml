@@ -52,3 +52,10 @@ identifier_name:
     - y
     - i
     - j
+    - db
+    - ts
+    - h
+    - s
+    - v
+    - v1
+    - SQLITE_TRANSIENT

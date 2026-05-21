@@ -2,9 +2,18 @@ import SwiftUI
 
 @main
 struct RememberMeApp: App {
+    @State private var environment = AppEnvironment.live()
+
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            RootView()
+                .environment(environment)
+                .task {
+                    await environment.ensureOpen()
+                    #if DEBUG
+                    await environment.autoImportSampleIfPresent()
+                    #endif
+                }
         }
     }
 }

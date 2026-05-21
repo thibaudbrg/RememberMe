@@ -7,11 +7,15 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		1544BEA7F2E25790FDA9B994 /* HomeDrawerContent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 33C7D10AB904CCFA12A12FD9 /* HomeDrawerContent.swift */; };
 		20A1E29C47F47EC88A1DAEE4 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52EB7D6841775B19967A7936 /* ContentView.swift */; };
+		2DAC7D5FC8621D92A0D47C28 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 820A1922F0FCD44BC0BF33BD /* RootView.swift */; };
 		3E14E7BFE8A84B607396FD20 /* Persistence in Frameworks */ = {isa = PBXBuildFile; productRef = 807E44FA23F72C64DE6C53E7 /* Persistence */; };
 		51C786493DA0947A45B2933E /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = BA9C0D05CD8E3563345443A4 /* Assets.xcassets */; };
 		5D6BED69ECF165BBC5B1D07D /* RememberMeApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE306BC0E830CC125D67446B /* RememberMeApp.swift */; };
+		9319D2945793DC27982C2DB5 /* AppEnvironment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 28D4B02006907946C5E6AE59 /* AppEnvironment.swift */; };
 		AA19DA0A9B59511C53DD052C /* RememberMeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 37D0C512BBE1DAFF83AD662C /* RememberMeTests.swift */; };
+		AEBAA265598696583A8E584A /* MapScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD8049DC129EA051648D6035 /* MapScreen.swift */; };
 		F2ED7A5DDDF71A5D52D2338B /* Core in Frameworks */ = {isa = PBXBuildFile; productRef = 10F24F4656C69ED13EF5EB2C /* Core */; };
 /* End PBXBuildFile section */
 
@@ -27,13 +31,18 @@
 
 /* Begin PBXFileReference section */
 		0DD6ABD0F11397F657B95172 /* RememberMe.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = RememberMe.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		2591E7212CD7260D2445E609 /* RememberMe.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = RememberMe.entitlements; sourceTree = "<group>"; };
+		28D4B02006907946C5E6AE59 /* AppEnvironment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppEnvironment.swift; sourceTree = "<group>"; };
+		33C7D10AB904CCFA12A12FD9 /* HomeDrawerContent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeDrawerContent.swift; sourceTree = "<group>"; };
 		37D0C512BBE1DAFF83AD662C /* RememberMeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RememberMeTests.swift; sourceTree = "<group>"; };
 		497A0066EFD599B51BC2C4B8 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		52EB7D6841775B19967A7936 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		562B25A6C55F3B15984F54F0 /* Core */ = {isa = PBXFileReference; lastKnownFileType = folder; name = Core; path = ../Packages/Core; sourceTree = SOURCE_ROOT; };
+		820A1922F0FCD44BC0BF33BD /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
 		A1B0BA43CD1C752A45661854 /* RememberMeTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = RememberMeTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		B074E4B72E80CB98CF828024 /* Persistence */ = {isa = PBXFileReference; lastKnownFileType = folder; name = Persistence; path = ../Packages/Persistence; sourceTree = SOURCE_ROOT; };
 		BA9C0D05CD8E3563345443A4 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		CD8049DC129EA051648D6035 /* MapScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MapScreen.swift; sourceTree = "<group>"; };
 		DE306BC0E830CC125D67446B /* RememberMeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RememberMeApp.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -77,11 +86,20 @@
 			path = RememberMeTests;
 			sourceTree = "<group>";
 		};
+		6A10BA70B51021A0350D51D7 /* Map */ = {
+			isa = PBXGroup;
+			children = (
+				CD8049DC129EA051648D6035 /* MapScreen.swift */,
+			);
+			path = Map;
+			sourceTree = "<group>";
+		};
 		869CDB413A570A6472F7D4B3 /* Resources */ = {
 			isa = PBXGroup;
 			children = (
 				BA9C0D05CD8E3563345443A4 /* Assets.xcassets */,
 				497A0066EFD599B51BC2C4B8 /* Info.plist */,
+				2591E7212CD7260D2445E609 /* RememberMe.entitlements */,
 			);
 			path = Resources;
 			sourceTree = "<group>";
@@ -90,6 +108,7 @@
 			isa = PBXGroup;
 			children = (
 				AFD9E2E087701A76BD2CAA32 /* App */,
+				F2DA27065C1803B734E285B9 /* Features */,
 				869CDB413A570A6472F7D4B3 /* Resources */,
 			);
 			path = RememberMe;
@@ -98,8 +117,10 @@
 		AFD9E2E087701A76BD2CAA32 /* App */ = {
 			isa = PBXGroup;
 			children = (
+				28D4B02006907946C5E6AE59 /* AppEnvironment.swift */,
 				52EB7D6841775B19967A7936 /* ContentView.swift */,
 				DE306BC0E830CC125D67446B /* RememberMeApp.swift */,
+				820A1922F0FCD44BC0BF33BD /* RootView.swift */,
 			);
 			path = App;
 			sourceTree = "<group>";
@@ -111,6 +132,23 @@
 				B074E4B72E80CB98CF828024 /* Persistence */,
 			);
 			name = Packages;
+			sourceTree = "<group>";
+		};
+		B92D7E6A3AAD6EF0C468B062 /* Drawer */ = {
+			isa = PBXGroup;
+			children = (
+				33C7D10AB904CCFA12A12FD9 /* HomeDrawerContent.swift */,
+			);
+			path = Drawer;
+			sourceTree = "<group>";
+		};
+		F2DA27065C1803B734E285B9 /* Features */ = {
+			isa = PBXGroup;
+			children = (
+				B92D7E6A3AAD6EF0C468B062 /* Drawer */,
+				6A10BA70B51021A0350D51D7 /* Map */,
+			);
+			path = Features;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -214,8 +252,12 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				9319D2945793DC27982C2DB5 /* AppEnvironment.swift in Sources */,
 				20A1E29C47F47EC88A1DAEE4 /* ContentView.swift in Sources */,
+				1544BEA7F2E25790FDA9B994 /* HomeDrawerContent.swift in Sources */,
+				AEBAA265598696583A8E584A /* MapScreen.swift in Sources */,
 				5D6BED69ECF165BBC5B1D07D /* RememberMeApp.swift in Sources */,
+				2DAC7D5FC8621D92A0D47C28 /* RootView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -293,6 +335,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = RememberMe/Resources/RememberMe.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = RememberMe/Resources/Info.plist;
@@ -345,6 +388,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = RememberMe/Resources/RememberMe.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = RememberMe/Resources/Info.plist;
