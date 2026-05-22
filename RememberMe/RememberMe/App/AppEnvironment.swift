@@ -677,6 +677,19 @@ public final class AppEnvironment {
         }
     }
 
+    /// Updates an activity's transport mode without touching anything else (coordinates,
+    /// distance, timestamps stay as recorded). Wired to the timeline's "Change mode"
+    /// context menu — TripStyle picks the new icon + friendly label automatically.
+    public func setMode(for trip: TripSummary, to newMode: String) async {
+        guard let database else { return }
+        do {
+            try Persistence.updateActivityMode(in: database, eventID: trip.id, mode: newMode)
+            await loadDay()
+        } catch {
+            importStatus = .failed(message: "Couldn't change mode: \(error.localizedDescription)")
+        }
+    }
+
     /// Triggers a one-off reverse-geocode for a place, refreshes markers when done.
     public func resolveLabel(for marker: VisitMarker) async -> String? {
         let label = await geocoder?.resolveOnDemand(placeID: marker.placeID, coordinate: marker.coordinate)
@@ -729,17 +742,23 @@ public final class AppEnvironment {
     /// the map. Activities and paths are separate events in this codebase; samples are
     /// keyed by the *path* event's id, not the activity's, so the naive lookup in
     /// `recordedPath(forEventID:)` returns empty for most trips.
+    ///
+    /// Aggregates samples from **every** path event overlapping the trip — Google's
+    /// Takeout chunks samples into 2-hour blocks, so a long drive spans multiple `path`
+    /// events. Picking only the first overlap dropped most of the samples for trips
+    /// longer than two hours.
     public func recordedSamples(forTrip trip: TripSummary) -> [Coordinate] {
-        guard let coveringPath = dayPathTraces.first(where: { overlap(path: $0, trip: trip) > 0 }) else {
-            return []
+        var collected: [(time: Date, coordinate: Coordinate)] = []
+        for path in dayPathTraces where overlap(path: path, trip: trip) > 0 {
+            for sample in path.samples {
+                let sampleTime = path.start.date.addingTimeInterval(TimeInterval(sample.offsetMinutes * 60))
+                if sampleTime >= trip.start.date && sampleTime <= trip.end.date {
+                    collected.append((sampleTime, sample.coordinate))
+                }
+            }
         }
-        let activityStartOffsetSec = trip.start.date.timeIntervalSince(coveringPath.start.date)
-        let activityEndOffsetSec = trip.end.date.timeIntervalSince(coveringPath.start.date)
-        return coveringPath.samples.compactMap { sample in
-            let offsetSec = TimeInterval(sample.offsetMinutes * 60)
-            guard offsetSec >= activityStartOffsetSec, offsetSec <= activityEndOffsetSec else { return nil }
-            return sample.coordinate
-        }
+        collected.sort { $0.time < $1.time }
+        return collected.map(\.coordinate)
     }
 
     private func overlap(path: PathTrace, trip: TripSummary) -> TimeInterval {

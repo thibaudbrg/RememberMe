@@ -11,8 +11,13 @@ enum RoutingError: Error, LocalizedError {
     case transitUnsupportedByApple
     case missingAPIKey
     case network
+    case throttled
     case cancelled
     case other(String)
+
+    /// Sentinel substring that the history runner matches against `controller.state`'s
+    /// failure message to detect rate-limiting and trigger back-off instead of skip.
+    static let throttledSentinel = "rate-limit"
 
     var errorDescription: String? {
         switch self {
@@ -24,6 +29,9 @@ enum RoutingError: Error, LocalizedError {
         case .missingAPIKey:
             "Google Directions API key missing. Paste your key in Alpha settings."
         case .network:  "Couldn't reach the routing service. Check your internet connection."
+        case .throttled:
+            // Contains `throttledSentinel` so callers can string-match.
+            "Apple Maps is rate-limiting us — waiting before retry."
         case .cancelled: "Routing cancelled."
         case let .other(message): message
         }
@@ -177,7 +185,7 @@ final class MapKitRouter {
         switch mkError.code {
         case .directionsNotFound: .noRoutes
         case .placemarkNotFound: .noRoutes
-        case .loadingThrottled: .network
+        case .loadingThrottled: .throttled
         case .serverFailure: .network
         default: .other(mkError.localizedDescription)
         }

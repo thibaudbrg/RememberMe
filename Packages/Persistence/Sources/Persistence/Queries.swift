@@ -140,6 +140,23 @@ public extension Persistence {
         try stmt.stepDone()
     }
 
+    /// Overwrites the `mode` column on an `activities` row. Used by the timeline's
+    /// "Change mode" context menu so the user can correct a misclassified trip without
+    /// touching its coordinates / distance / timestamps. Store the granular mode string
+    /// (e.g. `"driving"`, `"bus"`, `"subway"`) — `TripStyle.symbol/friendlyLabel` already
+    /// know how to render it.
+    static func updateActivityMode(
+        in database: SQLCipherDatabase,
+        eventID: UUID,
+        mode: String
+    ) throws {
+        let stmt = try database.prepare("UPDATE activities SET mode = ? WHERE event_id = ?;")
+        defer { stmt.finalize() }
+        try stmt.bind(1, text: mode)
+        try stmt.bind(2, text: eventID.uuidString)
+        try stmt.stepDone()
+    }
+
     /// Inserts or updates the row in `places` for this `placeID`. `resolved_at` is set to now.
     static func upsertPlace(
         in database: SQLCipherDatabase,

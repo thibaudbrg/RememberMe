@@ -203,10 +203,35 @@ struct RefinementMapView: View {
         ("blue", .blue),
     ]
 
+    /// Perceptual "neighbor" sets — palette entries that sit so close to the given accent
+    /// on screen that users mistake them for the same color as the recorded line. Keyed by
+    /// `AppAccent.rawValue` (lowercased). The accent itself is excluded separately, so
+    /// these only need to list the *other* near-collisions. Conservatively scoped so we
+    /// still have at least 6 distinct candidate hues left for any accent.
+    private static let accentNeighbors: [String: Set<String>] = [
+        "red": ["pink", "orange"],
+        "pink": ["red", "purple"],
+        "orange": ["red", "yellow", "brown"],
+        "yellow": ["orange", "mint"],
+        "green": ["mint", "teal"],
+        "mint": ["green", "teal", "cyan"],
+        "teal": ["mint", "cyan", "green"],
+        "cyan": ["teal", "blue", "mint"],
+        "blue": ["cyan", "indigo", "teal"],
+        "indigo": ["blue", "purple"],
+        "purple": ["indigo", "pink"],
+        "brown": ["orange"],
+    ]
+
     private func color(for index: Int) -> Color {
         let accentName = settings.accent.rawValue.lowercased()
-        let filtered = Self.basePalette.filter { $0.name != accentName }
-        return filtered[index % filtered.count].color
+        var excluded = Self.accentNeighbors[accentName] ?? []
+        excluded.insert(accentName)
+        let filtered = Self.basePalette.filter { !excluded.contains($0.name) }
+        // Defensive: if a future accent value somehow excludes the whole palette, fall
+        // back to the unfiltered list so we never crash on an empty modulo.
+        let pool = filtered.isEmpty ? Self.basePalette : filtered
+        return pool[index % pool.count].color
     }
 
     /// Reference distance for ratio-based similarity rating: prefer the candidate's

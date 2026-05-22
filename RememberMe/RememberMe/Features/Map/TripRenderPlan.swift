@@ -54,25 +54,28 @@ enum TripRenderPlan {
         if let refined = refinedByActivity[activity.id], refined.count >= 2 {
             return refined
         }
-        if let coveringPath = paths.first(where: { overlapSeconds(path: $0, activity: activity) > 0 }) {
-            let activityStartOffsetSec = activity.start.date.timeIntervalSince(coveringPath.start.date)
-            let activityEndOffsetSec = activity.end.date.timeIntervalSince(coveringPath.start.date)
-
-            var sliced: [Coordinate] = []
-            for sample in coveringPath.samples {
-                let sampleOffsetSec = TimeInterval(sample.offsetMinutes * 60)
-                if sampleOffsetSec >= activityStartOffsetSec, sampleOffsetSec <= activityEndOffsetSec {
-                    sliced.append(sample.coordinate)
+        // Aggregate samples from EVERY path event that overlaps the activity. Google's
+        // Takeout chunks GPS samples into 2-hour blocks, so a long drive spans multiple
+        // `path` events — picking just `.first` drops 3/4 of the samples for a 5-hour
+        // trip. We collect samples (sample-time, coordinate), filter to the activity's
+        // window, and sort chronologically across all paths.
+        var collected: [(time: Date, coordinate: Coordinate)] = []
+        for path in paths where overlapSeconds(path: path, activity: activity) > 0 {
+            for sample in path.samples {
+                let sampleTime = path.start.date.addingTimeInterval(TimeInterval(sample.offsetMinutes * 60))
+                if sampleTime >= activity.start.date && sampleTime <= activity.end.date {
+                    collected.append((sampleTime, sample.coordinate))
                 }
             }
-
+        }
+        if !collected.isEmpty {
+            collected.sort { $0.time < $1.time }
             // Bookend with the activity's own coordinates so:
             //   1. The polyline connects smoothly to the previous/next activity's polyline
             //   2. Very short activities that catch no samples still produce a usable line
             //      at the right location (and aren't accidentally drawn somewhere else).
-            var line: [Coordinate] = []
-            line.append(activity.startCoordinate)
-            line.append(contentsOf: sliced)
+            var line: [Coordinate] = [activity.startCoordinate]
+            line.append(contentsOf: collected.map(\.coordinate))
             line.append(activity.endCoordinate)
             return line
         }

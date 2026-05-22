@@ -25,7 +25,10 @@ struct TimelineDrawerContent: View {
 
     var body: some View {
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: 14) {
+            // Eager VStack so the ScrollView measures the full content height up-front;
+            // LazyVStack defers measurement of off-screen rows, which makes the scroll
+            // indicator scale against a too-small content size and "jump" mid-scroll.
+            VStack(alignment: .leading, spacing: 14) {
                 DayPickerView()
                     .padding(.horizontal, 20)
                     .padding(.top, 4)
@@ -56,8 +59,8 @@ struct TimelineDrawerContent: View {
                     .padding(.horizontal, 20)
                 }
 
-                if showRefineDayButton {
-                    RefineDayButton {
+                if showRefineRangeButton {
+                    RefineDayButton(label: refineRangeButtonLabel) {
                         refineDayRunning = true
                     }
                     .padding(.horizontal, 20)
@@ -67,8 +70,11 @@ struct TimelineDrawerContent: View {
             .padding(.bottom, 32)
         }
         .sheet(isPresented: $refineDayRunning) {
-            RefineDayProgressSheet()
-                .presentationDetents([.large])
+            RefineHistoryProgressSheet(
+                days: refineRangeDays,
+                title: refineRangeSheetTitle
+            )
+            .presentationDetents([.large])
         }
         .sheet(item: $refinementContext, onDismiss: {
             // Cleanup when the whole sheet closes (not when pushing internally — that's
@@ -95,13 +101,40 @@ struct TimelineDrawerContent: View {
         refinementContext = RefinementSheetContext(trip: trip, journey: journey)
     }
 
-    /// True when Alpha is on AND at least one trip on this day still needs refining and
-    /// has a routable mode. Used to gate the "Refine whole day" button.
-    private var showRefineDayButton: Bool {
+    /// True when Alpha is on AND at least one trip in the active range still needs refining
+    /// and has a routable mode. Used to gate the "Refine whole day / week / month" button.
+    /// `dayTrips` already spans `environment.dayRange`, so the same check works for all
+    /// three range kinds — no extra per-day fetch needed.
+    private var showRefineRangeButton: Bool {
         guard settings.alphaModeEnabled else { return false }
         return environment.dayTrips.contains { trip in
             !environment.dayRefinedActivityIDs.contains(trip.id)
                 && RefinementMode.map(recordedMode: trip.mode) != nil
+        }
+    }
+
+    /// Label on the bottom button, adapting to the active range.
+    private var refineRangeButtonLabel: String {
+        switch environment.selectedRange {
+        case .day: "Refine whole day"
+        case .week: "Refine whole week"
+        case .month: "Refine whole month"
+        }
+    }
+
+    /// Navigation title on the runner sheet, mirroring the button label.
+    private var refineRangeSheetTitle: String { refineRangeButtonLabel }
+
+    /// Days the runner should iterate. For `.day` that's just the selected day; for week /
+    /// month we intersect `daysWithData` with the active `dayRange` so we don't waste
+    /// requests on days that have no events.
+    private var refineRangeDays: [Date] {
+        switch environment.selectedRange {
+        case .day:
+            return [environment.selectedDay]
+        case .week, .month:
+            let range = environment.dayRange
+            return environment.daysWithData.filter { range.contains($0) }
         }
     }
 
@@ -264,26 +297,32 @@ private struct EventList: View {
                     .contentShape(Rectangle())
                     .onTapGesture { onTap(entry) }
                     .contextMenu {
-                        if entry.kind == "activity", settings.alphaModeEnabled {
-                            // Precomputed lookup — runs in O(1). Same Journey instance for
-                            // every member leg, so A, B, and C all see identical menu items.
-                            let journey = environment.dayJourneysByAnchor[entry.id]
-                            Button {
-                                onRefine(entry, nil)
-                            } label: {
-                                Label(
-                                    "Refine this trip only",
-                                    systemImage: "point.topleft.down.curvedto.point.bottomright.up"
-                                )
-                            }
-                            if let journey, journey.isMultiLeg {
+                        if entry.kind == "activity" {
+                            // Mode change — available regardless of alpha mode; doesn't
+                            // touch coords / distance / timestamps, just relabels the trip.
+                            ChangeModeMenu(entry: entry)
+
+                            if settings.alphaModeEnabled {
+                                // Precomputed lookup — runs in O(1). Same Journey instance for
+                                // every member leg, so A, B, and C all see identical menu items.
+                                let journey = environment.dayJourneysByAnchor[entry.id]
                                 Button {
-                                    onRefine(entry, journey)
+                                    onRefine(entry, nil)
                                 } label: {
                                     Label(
-                                        "Refine whole journey — \(journey.legCount) legs",
-                                        systemImage: "arrow.triangle.branch"
+                                        "Refine this trip only",
+                                        systemImage: "point.topleft.down.curvedto.point.bottomright.up"
                                     )
+                                }
+                                if let journey, journey.isMultiLeg {
+                                    Button {
+                                        onRefine(entry, journey)
+                                    } label: {
+                                        Label(
+                                            "Refine whole journey — \(journey.legCount) legs",
+                                            systemImage: "arrow.triangle.branch"
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -298,8 +337,10 @@ private struct EventList: View {
 }
 
 /// Multi-day view: groups entries by their local start day and shows each group as its own
-/// labelled card. Order is newest day first.
+/// labelled card. Order is newest day first. Tapping the day header jumps to that day's
+/// day-mode filter so the user can drill in to a single day from the week/month view.
 private struct GroupedEventList: View {
+    @Environment(AppEnvironment.self) private var environment
     let entries: [TimelineEntry]
     let onTap: (TimelineEntry) -> Void
     let onRefine: (TimelineEntry, Journey?) -> Void
@@ -308,10 +349,26 @@ private struct GroupedEventList: View {
         VStack(alignment: .leading, spacing: 18) {
             ForEach(groups, id: \.day) { group in
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(dayLabel(group.day))
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.secondary)
+                    Button {
+                        Task {
+                            // Switch the active range to .day first so loadDay()'s next
+                            // run uses the right window, then jump to the tapped day.
+                            await environment.selectRange(.day)
+                            await environment.selectDay(group.day)
+                        }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Text(dayLabel(group.day))
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                            Image(systemName: "chevron.right")
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                        }
                         .padding(.horizontal, 4)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
                     EventList(entries: group.entries, onTap: onTap, onRefine: onRefine)
                 }
             }
@@ -446,14 +503,54 @@ private struct EventTimelineRow: View {
     }
 }
 
+/// Submenu inside the timeline context-menu for swapping an activity's transport mode.
+/// Pure metadata edit — coordinates, distance, timestamps stay as-recorded; only the
+/// icon + label update. Looks up the matching `TripSummary` from `dayTrips` so the DB
+/// update can target the activity row.
+private struct ChangeModeMenu: View {
+    @Environment(AppEnvironment.self) private var environment
+    let entry: TimelineEntry
+
+    /// (storedMode, displayLabel, sfSymbol). The stored mode strings match what
+    /// `TripStyle.symbol(for:)` and `friendlyLabel(for:)` recognise so the row's icon
+    /// and label update automatically after `loadDay()`.
+    private static let options: [(String, String, String)] = [
+        ("walking", "Walking", "figure.walk"),
+        ("driving", "Driving", "car.fill"),
+        ("cycling", "Cycling", "bicycle"),
+        ("bus", "Bus", "bus"),
+        ("train", "Train", "tram"),
+        ("subway", "Subway", "tram.fill"),
+        ("tram", "Tram", "tram"),
+        ("ferry", "Ferry", "ferry"),
+    ]
+
+    var body: some View {
+        Menu {
+            ForEach(Self.options, id: \.0) { stored, label, symbol in
+                Button {
+                    guard let trip = environment.dayTrips.first(where: { $0.id == entry.id })
+                    else { return }
+                    Task { await environment.setMode(for: trip, to: stored) }
+                } label: {
+                    Label(label, systemImage: symbol)
+                }
+            }
+        } label: {
+            Label("Change mode", systemImage: "arrow.left.arrow.right")
+        }
+    }
+}
+
 /// Capsule call-to-action shown at the bottom of the timeline when there are still
-/// refinable trips on the selected day. Triggers the sequential runner sheet.
+/// refinable trips in the active range. Triggers the sequential runner sheet.
 private struct RefineDayButton: View {
+    let label: String
     let onTap: () -> Void
 
     var body: some View {
         Button(action: onTap) {
-            Label("Refine whole day", systemImage: "sparkles")
+            Label(label, systemImage: "sparkles")
                 .font(.callout.weight(.semibold))
                 .foregroundStyle(.tint)
                 .padding(.horizontal, 18)

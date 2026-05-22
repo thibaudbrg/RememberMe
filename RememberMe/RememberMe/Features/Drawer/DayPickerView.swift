@@ -171,7 +171,12 @@ private struct CalendarSheet: View {
                 if !Calendar.current.isDateInToday(selection) {
                     Button("Today") {
                         selection = Date()
-                        Task { await environment.selectDay(Date()) }
+                        Task {
+                            // Drop back to single-day view — picking a specific date in
+                            // the calendar always means "show me that day".
+                            await environment.selectRange(.day)
+                            await environment.selectDay(Date())
+                        }
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
@@ -194,7 +199,12 @@ private struct CalendarSheet: View {
             .padding(.horizontal, 12)
             .padding(.top, 4)
             .onChange(of: selection) { _, newValue in
-                Task { await environment.selectDay(newValue) }
+                Task {
+                    // Picking a specific date in the calendar means "show me that day",
+                    // even if the user was previously in the week/month filter.
+                    await environment.selectRange(.day)
+                    await environment.selectDay(newValue)
+                }
             }
 
             if !environment.daysWithData.isEmpty {

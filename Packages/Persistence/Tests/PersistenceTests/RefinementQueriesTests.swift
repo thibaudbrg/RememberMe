@@ -407,6 +407,112 @@ final class RefinementQueriesTests: XCTestCase {
         XCTAssertNil(try Persistence.refinement(in: database, eventID: walkID))
     }
 
+    func testJourneyRevertFromDerivedSubActivityUnsupersedesAllMembersAndDropsAllDerived() throws {
+        // Mirrors the bug scenario: user long-presses a *derived* leg (D2) of a journey
+        // refinement and reverts. The controller resolves parentEventID(D2) -> A then
+        // calls revertRefinement(A). All originals (A, B, C) must come back and all
+        // derived (D1, D2, D3) must disappear.
+        let aID = UUID()
+        let bID = UUID()
+        let cID = UUID()
+        try seedActivity(id: aID)
+        try seedActivity(id: bID)
+        try seedActivity(id: cID)
+        try database.execute("""
+            UPDATE events SET start_ts = 1700000000, end_ts = 1700003600
+            WHERE id IN ('\(aID.uuidString)', '\(bID.uuidString)', '\(cID.uuidString)');
+        """)
+
+        let legs = [
+            LegInput(mode: "walking", label: nil, coordinates: [
+                Coordinate(latitude: 0, longitude: 0),
+                Coordinate(latitude: 0.001, longitude: 0.001),
+            ], distanceMeters: 250, travelTimeSeconds: 200),
+            LegInput(mode: "bus", label: "Bus 38", coordinates: [
+                Coordinate(latitude: 0.001, longitude: 0.001),
+                Coordinate(latitude: 0.05, longitude: 0.05),
+            ], distanceMeters: 4000, travelTimeSeconds: 900),
+            LegInput(mode: "walking", label: nil, coordinates: [
+                Coordinate(latitude: 0.05, longitude: 0.05),
+                Coordinate(latitude: 0.051, longitude: 0.051),
+            ], distanceMeters: 200, travelTimeSeconds: 180),
+        ]
+        let journeyIDs = [aID, bID, cID]
+        try Persistence.applyJourneyRefinement(
+            in: database,
+            primaryEventID: aID,
+            supersededEventIDs: journeyIDs,
+            journeyStartTs: 1_700_000_000,
+            journeyEndTs: 1_700_003_600,
+            timezoneOffsetMin: 0,
+            source: "google_maps",
+            originalSamples: [Coordinate(latitude: 0, longitude: 0)],
+            legs: legs,
+            record: RefinementRecord(
+                eventID: aID,
+                refinedAt: Date(timeIntervalSince1970: 1_700_000_500),
+                source: "google_maps",
+                routeName: nil,
+                transportType: "transit",
+                similarityMeanMeters: 5,
+                similarityP95Meters: 12,
+                similarityMaxMeters: 20,
+                expectedTravelTimeSeconds: 1400,
+                expectedDistanceMeters: 4450,
+                candidateCount: 1,
+                chosenIndex: 0,
+                originalPointCount: 1,
+                refinedPointCount: 6,
+                journeyMemberIDs: journeyIDs
+            )
+        )
+
+        // Pull the middle derived event id (D2) — the leg the user long-pressed.
+        let derivedStmt = try database.prepare("""
+            SELECT id FROM events WHERE derived_from_event_id = ? ORDER BY start_ts ASC;
+        """)
+        defer { derivedStmt.finalize() }
+        try derivedStmt.bind(1, text: aID.uuidString)
+        var derivedIDs: [UUID] = []
+        while derivedStmt.step() == .row {
+            if let text = derivedStmt.columnText(0), let id = UUID(uuidString: text) {
+                derivedIDs.append(id)
+            }
+        }
+        XCTAssertEqual(derivedIDs.count, 3, "expected three derived legs")
+        let d2 = derivedIDs[1]
+
+        // Simulate exactly what PathRefinementController.revert(trip:) does: look up the
+        // parent of the long-pressed derived event then revert against the parent id.
+        let parent = try Persistence.parentEventID(in: database, eventID: d2)
+        XCTAssertEqual(parent, aID, "parentEventID(D2) must resolve to A — otherwise revert only touches the leaf")
+        try Persistence.revertRefinement(in: database, eventID: parent ?? d2)
+
+        // All 3 originals un-superseded.
+        let supersededCount = try database.prepare(
+            "SELECT count(*) FROM events WHERE is_superseded = 1 AND id IN (?, ?, ?);"
+        )
+        defer { supersededCount.finalize() }
+        try supersededCount.bind(1, text: aID.uuidString)
+        try supersededCount.bind(2, text: bID.uuidString)
+        try supersededCount.bind(3, text: cID.uuidString)
+        XCTAssertEqual(supersededCount.step(), .row)
+        XCTAssertEqual(supersededCount.columnInt(0), 0, "every journey member must be un-superseded")
+
+        // Zero derived events left.
+        let derivedCount = try database.prepare(
+            "SELECT count(*) FROM events WHERE derived_from_event_id = ?;"
+        )
+        defer { derivedCount.finalize() }
+        try derivedCount.bind(1, text: aID.uuidString)
+        XCTAssertEqual(derivedCount.step(), .row)
+        XCTAssertEqual(derivedCount.columnInt(0), 0, "every derived leg must be deleted")
+
+        // No audit row, no snapshot.
+        XCTAssertNil(try Persistence.refinement(in: database, eventID: aID))
+        XCTAssertEqual(try originalCount(eventID: aID), 0)
+    }
+
     func testFetchRefinedActivityIDsIncludesDirectAndDerived() throws {
         // Seed two activities. One gets a single-trip refinement (audit row keyed to it),
         // the other becomes the primary for a multi-leg refinement (two derived activities).

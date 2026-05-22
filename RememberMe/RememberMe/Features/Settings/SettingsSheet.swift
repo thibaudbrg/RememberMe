@@ -21,6 +21,8 @@ struct SettingsSheet: View {
 
     @State private var showingAlphaConfirmation = false
     @State private var showingGoogleConfirmation = false
+    @State private var showingRefineHistoryConfirm = false
+    @State private var showingRefineHistoryRun = false
 
     var body: some View {
         @Bindable var settings = settings
@@ -138,6 +140,12 @@ struct SettingsSheet: View {
                         Label("Long-press a trip in the timeline to refine it.", systemImage: "hand.tap")
                             .font(.caption)
                             .foregroundStyle(.secondary)
+
+                        Button(role: .destructive) {
+                            showingRefineHistoryConfirm = true
+                        } label: {
+                            Label("Refine entire history", systemImage: "wand.and.stars")
+                        }
                     }
                 } header: {
                     Text("Alpha features")
@@ -200,9 +208,45 @@ struct SettingsSheet: View {
             .sheet(isPresented: $showingGoogleConfirmation) {
                 GoogleConfirmationSheet(selectedProvider: $settings.refinementProvider)
             }
+            .alert("Refine entire history?", isPresented: $showingRefineHistoryConfirm) {
+                Button("Cancel", role: .cancel) {}
+                Button("Refine", role: .destructive) {
+                    showingRefineHistoryRun = true
+                }
+            } message: {
+                Text(refineHistoryWarningText)
+            }
+            .sheet(isPresented: $showingRefineHistoryRun) {
+                RefineHistoryProgressSheet(days: environment.daysWithData, title: "Refine history")
+                    .presentationDetents([.large])
+            }
         }
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
+    }
+
+    /// Built per-provider so the user sees their actual cost exposure up front.
+    private var refineHistoryWarningText: String {
+        let dayCount = environment.daysWithData.count
+        let estimatedRequests = max(1, dayCount * 5)
+        let providerLine: String
+        switch settings.refinementProvider {
+        case .apple:
+            providerLine = "Provider: Apple Maps (no API cost). Transit / flight trips will be skipped."
+        case .google:
+            let estimatedDollars = Double(estimatedRequests) * 0.005
+            providerLine = String(
+                format: "Provider: Google Maps. ~%d requests, up to ~$%.2f at standard rates (free tier covers a lot).",
+                estimatedRequests, estimatedDollars
+            )
+        }
+        return """
+        \(dayCount) days will be processed, newest first.
+
+        \(providerLine)
+
+        Some trips may be skipped — sparse GPS, network errors, or modes the provider doesn't route. This may take a long time. You can cancel at any moment.
+        """
     }
 
     private var alphaFooterText: String {
