@@ -81,7 +81,7 @@ final class EncryptionSmokeTests: XCTestCase {
         let reopened = try DatabaseFactory.open(at: dbURL.path, keyStore: store, excludeFromBackup: false)
         let stmt = try reopened.prepare("SELECT place_id, lat, lon FROM places;")
         defer { stmt.finalize() }
-        XCTAssertEqual(stmt.step(), .row)
+        XCTAssertEqual(try stmt.step(), .row)
         XCTAssertEqual(stmt.columnText(0), "persisted")
         XCTAssertEqual(stmt.columnDouble(1), 1.0)
         XCTAssertEqual(stmt.columnDouble(2), 2.0)

@@ -14,22 +14,23 @@ public final class EventWriter: Sendable {
         self.batchSize = batchSize
     }
 
-    /// Inserts every event. Each contiguous chunk of `batchSize` runs in a single transaction.
-    /// Returns the number of events written.
+    /// Inserts every event. The entire run is wrapped in a single transaction so a mid-import
+    /// failure leaves nothing committed — the offered "Try again" then re-imports from a clean
+    /// slate instead of duplicating a partial write. Returns the number of events written.
     @discardableResult
     public func write(_ events: [Event], importedAt: Date = Date()) throws -> Int {
         guard !events.isEmpty else { return 0 }
         var written = 0
         let importedAtUnix = Int64(importedAt.timeIntervalSince1970)
-        var index = 0
-        while index < events.count {
-            let upper = min(index + batchSize, events.count)
-            let slice = events[index ..< upper]
-            try database.transaction {
+        try database.transaction {
+            var index = 0
+            while index < events.count {
+                let upper = min(index + batchSize, events.count)
+                let slice = events[index ..< upper]
                 try insertSlice(slice, importedAt: importedAtUnix)
+                written += slice.count
+                index = upper
             }
-            written += slice.count
-            index = upper
         }
         return written
     }
@@ -38,7 +39,7 @@ public final class EventWriter: Sendable {
 
     private func insertSlice(_ slice: ArraySlice<Event>, importedAt: Int64) throws {
         let eventStmt = try database.prepare("""
-            INSERT INTO events
+            INSERT OR IGNORE INTO events
                 (id, kind, start_ts, start_tz_offset_min, end_ts, end_tz_offset_min, source, imported_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?);
         """)
@@ -65,6 +66,9 @@ public final class EventWriter: Sendable {
 
         for event in slice {
             try bindAndStepEvent(event, stmt: eventStmt, importedAt: importedAt)
+            // INSERT OR IGNORE skips an event whose id (deterministic across re-imports)
+            // already exists; its children are already present, so don't re-insert them.
+            guard eventStmt.changes > 0 else { continue }
 
             switch event.kind {
             case let .activity(details):

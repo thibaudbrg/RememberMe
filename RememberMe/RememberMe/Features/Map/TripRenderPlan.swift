@@ -54,28 +54,14 @@ enum TripRenderPlan {
         if let refined = refinedByActivity[activity.id], refined.count >= 2 {
             return refined
         }
-        // Aggregate samples from EVERY path event that overlaps the activity. Google's
-        // Takeout chunks GPS samples into 2-hour blocks, so a long drive spans multiple
-        // `path` events — picking just `.first` drops 3/4 of the samples for a 5-hour
-        // trip. We collect samples (sample-time, coordinate), filter to the activity's
-        // window, and sort chronologically across all paths.
-        var collected: [(time: Date, coordinate: Coordinate)] = []
-        for path in paths where overlapSeconds(path: path, activity: activity) > 0 {
-            for sample in path.samples {
-                let sampleTime = path.start.date.addingTimeInterval(TimeInterval(sample.offsetMinutes * 60))
-                if sampleTime >= activity.start.date && sampleTime <= activity.end.date {
-                    collected.append((sampleTime, sample.coordinate))
-                }
-            }
-        }
+        let collected = slicedSamples(for: activity, paths: paths)
         if !collected.isEmpty {
-            collected.sort { $0.time < $1.time }
             // Bookend with the activity's own coordinates so:
             //   1. The polyline connects smoothly to the previous/next activity's polyline
             //   2. Very short activities that catch no samples still produce a usable line
             //      at the right location (and aren't accidentally drawn somewhere else).
             var line: [Coordinate] = [activity.startCoordinate]
-            line.append(contentsOf: collected.map(\.coordinate))
+            line.append(contentsOf: collected)
             line.append(activity.endCoordinate)
             return line
         }
@@ -88,6 +74,27 @@ enum TripRenderPlan {
         )
     }
 
+    /// Recorded GPS samples for `activity`, aggregated from EVERY overlapping `path` event,
+    /// filtered to the activity's time window, sorted chronologically. No bookend endpoints —
+    /// just the raw recorded samples. Shared single source of truth for the map's polyline
+    /// rendering and `AppEnvironment.recordedSamples` (used by the refinement scoring).
+    ///
+    /// Google's Takeout chunks GPS samples into 2-hour blocks, so a long drive spans multiple
+    /// `path` events — picking just `.first` drops 3/4 of the samples for a 5-hour trip.
+    static func slicedSamples(for activity: TripSummary, paths: [PathTrace]) -> [Coordinate] {
+        var collected: [(time: Date, coordinate: Coordinate)] = []
+        for path in paths where overlapSeconds(path: path, activity: activity) > 0 {
+            for sample in path.samples {
+                let sampleTime = path.start.date.addingTimeInterval(TimeInterval(sample.offsetMinutes * 60))
+                if sampleTime >= activity.start.date && sampleTime <= activity.end.date {
+                    collected.append((sampleTime, sample.coordinate))
+                }
+            }
+        }
+        collected.sort { $0.time < $1.time }
+        return collected.map(\.coordinate)
+    }
+
     /// Single-source-of-truth for "what does focus on this activity zoom to" — same coordinates
     /// we'd draw on the map, so the camera and the line always agree.
     static func focusCoordinates(
@@ -96,12 +103,6 @@ enum TripRenderPlan {
         refinedByActivity: [UUID: [Coordinate]] = [:]
     ) -> [Coordinate] {
         coordinates(for: activity, paths: paths, refinedByActivity: refinedByActivity)
-    }
-
-    /// Still used by the timeline-tap handler to decide whether a path row is redundant
-    /// with an activity row.
-    static func isCoveredByAnyPath(_ activity: TripSummary, paths: [PathTrace]) -> Bool {
-        paths.contains { overlapSeconds(path: $0, activity: activity) > 0 }
     }
 
     // MARK: - Internals

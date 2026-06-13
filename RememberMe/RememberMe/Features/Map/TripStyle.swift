@@ -1,20 +1,10 @@
 import Core
-import SwiftUI
 
 /// Visual treatment for activity (trip) polylines and the matching timeline rows.
 ///
-/// Per the round-6 ask: every trip is blue. Variation lives in dash pattern and curvature:
-///   - **walking / running** → solid blue dashed line
-///   - **flying** → solid blue great-circle arc (curved on the map)
-///   - **all other modes** → solid blue line
+/// Trip lines are drawn in the user's accent color (see `MapScreen`); this type only decides
+/// geometry (flights get a great-circle arc) and the timeline symbol/label per mode.
 enum TripStyle {
-    /// Single accent for every trip polyline.
-    static let polylineColor: Color = .blue
-
-    /// Light-blue version used for `path` event GPS traces so they're visible without competing
-    /// with activity lines on top.
-    static let pathTraceColor: Color = .blue.opacity(0.35)
-
     /// True if the trip should be drawn as a curved great-circle arc rather than a straight line.
     static func isFlight(_ mode: String) -> Bool {
         let normalized = mode.lowercased()

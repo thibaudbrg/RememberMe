@@ -15,17 +15,22 @@ public final class PreparedStatement: @unchecked Sendable {
     private let handle: OpaquePointer
     private let dbHandle: OpaquePointer
     private let sql: String
+    /// The database's recursive lock, acquired by `prepare()` and released when this statement is
+    /// finalized — so the statement owns the connection for its whole lifecycle. See `SQLCipherDatabase`.
+    private let lock: NSRecursiveLock
     private var finalized = false
 
-    init(handle: OpaquePointer, dbHandle: OpaquePointer, sql: String) {
+    init(handle: OpaquePointer, dbHandle: OpaquePointer, sql: String, lock: NSRecursiveLock) {
         self.handle = handle
         self.dbHandle = dbHandle
         self.sql = sql
+        self.lock = lock
     }
 
     deinit {
         if !finalized {
             sqlite3_finalize(handle)
+            lock.unlock()
         }
     }
 
@@ -33,6 +38,7 @@ public final class PreparedStatement: @unchecked Sendable {
         if !finalized {
             sqlite3_finalize(handle)
             finalized = true
+            lock.unlock()
         }
     }
 
@@ -52,8 +58,14 @@ public final class PreparedStatement: @unchecked Sendable {
         }
     }
 
-    public func step() -> StepResult {
-        sqlite3_step(handle) == SQLITE_ROW ? .row : .done
+    public func step() throws -> StepResult {
+        let code = sqlite3_step(handle)
+        switch code {
+        case SQLITE_ROW: return .row
+        case SQLITE_DONE: return .done
+        default:
+            throw DatabaseError.stepFailed(code: code, message: String(cString: sqlite3_errmsg(dbHandle)))
+        }
     }
 
     /// Steps once and asserts the result is `.done`. Used for INSERT/UPDATE/DELETE.
@@ -62,6 +74,12 @@ public final class PreparedStatement: @unchecked Sendable {
         if code != SQLITE_DONE {
             throw DatabaseError.stepFailed(code: code, message: String(cString: sqlite3_errmsg(dbHandle)))
         }
+    }
+
+    /// Number of rows changed by the most recent INSERT/UPDATE/DELETE on this connection.
+    /// Lets callers detect an UPDATE that matched zero rows.
+    public var changes: Int {
+        Int(sqlite3_changes(dbHandle))
     }
 
     // MARK: - Binding (1-indexed, as in the SQLite C API)
@@ -137,6 +155,12 @@ public final class PreparedStatement: @unchecked Sendable {
     public func columnText(_ index: Int32) -> String? {
         guard let cString = sqlite3_column_text(handle, index) else { return nil }
         return String(cString: cString)
+    }
+
+    /// True when the column at `index` holds SQL NULL. Lets callers distinguish a
+    /// genuine 0.0 from the 0.0 that `columnDouble` returns for NULL.
+    public func columnIsNull(_ index: Int32) -> Bool {
+        sqlite3_column_type(handle, index) == SQLITE_NULL
     }
 }
 

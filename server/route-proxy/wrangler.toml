@@ -1,0 +1,43 @@
+# rm-route-proxy — anonymous Google Directions proxy gated by Apple App Attest.
+#
+# Replace every "REPLACE_ME" KV namespace id with a real id (see README runbook).
+# Secrets (GOOGLE_MAPS_KEY, DEV_SHARED_SECRET) are NOT stored here — set them with
+# `wrangler secret put`. Never commit secrets to this file.
+
+name = "rm-route-proxy"
+main = "src/index.ts"
+compatibility_date = "2024-09-23"
+compatibility_flags = ["nodejs_compat"]
+
+# Anonymity invariant: observability OFF. We never want request/response telemetry
+# that could carry coordinates, bodies, IPs, or timing fingerprints into Cloudflare logs.
+[observability]
+enabled = false
+
+# ---- Production (default) environment ----
+[vars]
+APPLE_TEAM_ID = "5G62UR3GA6"
+APPLE_BUNDLE_ID = "app.wave9617.plantain4773"
+APPATTEST_ENV = "production"
+DEV_BYPASS = "false"
+
+[[kv_namespaces]]
+binding = "RM_KV"
+id = "585ba99ac8a34dafab76b1b2deb5acef"
+
+# ---- Dev environment (`wrangler deploy --env dev` / `wrangler dev --env dev`) ----
+# Separate worker name and KV namespace so dev attestations / counters never touch prod.
+[env.dev]
+name = "rm-route-proxy-dev"
+
+[env.dev.vars]
+APPLE_TEAM_ID = "5G62UR3GA6"
+APPLE_BUNDLE_ID = "app.wave9617.plantain4773"
+# Dev builds attest against Apple's development App Attest environment.
+APPATTEST_ENV = "development"
+# Enables the X-Dev-Secret bypass on /v1/route (requires the DEV_SHARED_SECRET secret).
+DEV_BYPASS = "true"
+
+[[env.dev.kv_namespaces]]
+binding = "RM_KV"
+id = "ded9a1b75b184b7a9cda9c695eb499a1"

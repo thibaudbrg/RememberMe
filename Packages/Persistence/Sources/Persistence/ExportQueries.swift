@@ -9,7 +9,7 @@ public extension Persistence {
         let events = try fetchExportedEvents(in: database)
         let places = try fetchExportedPlaces(in: database)
         return ExportPayload(
-            version: 1,
+            version: 2,
             exportedAt: exportedAt,
             events: events,
             places: places
@@ -31,8 +31,9 @@ public extension Persistence {
         try database.transaction {
             let eventStmt = try database.prepare("""
                 INSERT OR IGNORE INTO events
-                    (id, kind, start_ts, start_tz_offset_min, end_ts, end_tz_offset_min, source, imported_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+                    (id, kind, start_ts, start_tz_offset_min, end_ts, end_tz_offset_min, source, imported_at,
+                     is_superseded, derived_from_event_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """)
             defer { eventStmt.finalize() }
 
@@ -71,12 +72,18 @@ public extension Persistence {
                 // Use the original imported_at if non-zero, else stamp with now — keeps
                 // provenance when re-importing the same backup.
                 try eventStmt.bind(8, int64: event.importedAt > 0 ? event.importedAt : importedAtUnix)
+                try eventStmt.bind(9, int: event.isSuperseded ? 1 : 0)
+                if let derivedFrom = event.derivedFromEventID {
+                    try eventStmt.bind(10, text: derivedFrom)
+                } else {
+                    try eventStmt.bindNull(10)
+                }
                 try eventStmt.stepDone()
 
                 // changes() returns row count from the last INSERT — 0 means the OR IGNORE
                 // skipped because of a primary-key conflict.
                 try changesStmt.reset()
-                if changesStmt.step() == .row, changesStmt.columnInt(0) > 0 {
+                if try changesStmt.step() == .row, changesStmt.columnInt(0) > 0 {
                     newEventCount += 1
                 }
 
@@ -124,7 +131,7 @@ public extension Persistence {
                 ON CONFLICT(place_id) DO UPDATE SET
                     user_label     = COALESCE(excluded.user_label, places.user_label),
                     resolved_label = COALESCE(excluded.resolved_label, places.resolved_label),
-                    resolved_at    = MAX(excluded.resolved_at, places.resolved_at),
+                    resolved_at    = MAX(COALESCE(excluded.resolved_at, 0), COALESCE(places.resolved_at, 0)),
                     lat            = excluded.lat,
                     lon            = excluded.lon;
             """)
@@ -154,7 +161,8 @@ public extension Persistence {
                 e.end_ts, e.end_tz_offset_min, e.source, e.imported_at,
                 a.start_lat, a.start_lon, a.end_lat, a.end_lon,
                 a.distance_m, a.mode, a.probability,
-                v.place_id, v.lat, v.lon, v.semantic_type, v.hierarchy_level, v.probability
+                v.place_id, v.lat, v.lon, v.semantic_type, v.hierarchy_level, v.probability,
+                e.is_superseded, e.derived_from_event_id
             FROM events e
             LEFT JOIN activities a ON a.event_id = e.id
             LEFT JOIN visits     v ON v.event_id = e.id
@@ -163,7 +171,7 @@ public extension Persistence {
         defer { stmt.finalize() }
 
         var events: [ExportedEvent] = []
-        while stmt.step() == .row {
+        while try stmt.step() == .row {
             guard let id = stmt.columnText(0),
                   let kind = stmt.columnText(1)
             else { continue }
@@ -200,6 +208,8 @@ public extension Persistence {
                 endTzOffsetMin: stmt.columnInt(5),
                 source: stmt.columnText(6) ?? "",
                 importedAt: stmt.columnInt64(7),
+                isSuperseded: stmt.columnInt(21) != 0,
+                derivedFromEventID: stmt.columnText(22),
                 activity: activity,
                 visit: visit,
                 pathPoints: nil
@@ -215,7 +225,7 @@ public extension Persistence {
         defer { pathStmt.finalize() }
 
         var pointsByEvent: [String: [ExportedPathPoint]] = [:]
-        while pathStmt.step() == .row {
+        while try pathStmt.step() == .row {
             guard let eventID = pathStmt.columnText(0) else { continue }
             pointsByEvent[eventID, default: []].append(ExportedPathPoint(
                 seq: pathStmt.columnInt(1),
@@ -236,6 +246,8 @@ public extension Persistence {
                 endTzOffsetMin: event.endTzOffsetMin,
                 source: event.source,
                 importedAt: event.importedAt,
+                isSuperseded: event.isSuperseded,
+                derivedFromEventID: event.derivedFromEventID,
                 activity: event.activity,
                 visit: event.visit,
                 pathPoints: points
@@ -252,7 +264,7 @@ public extension Persistence {
         defer { stmt.finalize() }
 
         var places: [ExportedPlace] = []
-        while stmt.step() == .row {
+        while try stmt.step() == .row {
             guard let placeID = stmt.columnText(0) else { continue }
             let resolvedAt = stmt.columnInt64(3)
             places.append(ExportedPlace(

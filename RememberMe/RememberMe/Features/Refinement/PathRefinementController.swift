@@ -12,8 +12,8 @@ struct ScoredCandidate: Hashable, Identifiable {
     var id: UUID { candidate.id }
 }
 
-/// Drives the debug-mode path-refinement screen. Holds transient fetch state for one trip
-/// at a time. Calls into `MapKitRouter` + `Persistence` + refreshes the live `AppEnvironment`
+/// Drives the path-refinement screen. Holds transient fetch state for one trip
+/// at a time. Calls into `RouteProxyRouter` + `Persistence` + refreshes the live `AppEnvironment`
 /// so the rest of the app sees the refined polyline immediately.
 @MainActor
 @Observable
@@ -34,22 +34,26 @@ final class PathRefinementController {
         }
     }
 
-    private let appleRouter: MapKitRouter
-    private let googleRouter: GoogleDirectionsRouter
+    private let router: RouteProxyRouter
     private weak var environment: AppEnvironment?
-    private weak var settings: Settings?
 
     var state: FetchState = .idle
     /// The trip currently being inspected. Cleared when the user navigates away.
     var activeTripID: UUID?
+    /// Typed failure from the most recent fetch, cleared on success. Lets the history
+    /// runner distinguish genuine no-route outcomes (persist a skip) from transient
+    /// network / throttle failures (back off and retry) and config failures (abort).
+    private(set) var lastError: RoutingError?
+    /// Bumped at the start of every fetch. A fetch only writes its terminal state if its
+    /// captured generation still matches — so a stale fetch completing late can't clobber
+    /// the state (or candidates) of a newer fetch for a different trip.
+    private var fetchGeneration = 0
 
     init(
-        appleRouter: MapKitRouter = MapKitRouter(),
-        googleRouter: GoogleDirectionsRouter = GoogleDirectionsRouter(),
+        router: RouteProxyRouter = RouteProxyRouter(),
         environment: AppEnvironment? = nil
     ) {
-        self.appleRouter = appleRouter
-        self.googleRouter = googleRouter
+        self.router = router
         self.environment = environment
     }
 
@@ -57,13 +61,12 @@ final class PathRefinementController {
         self.environment = environment
     }
 
-    func bind(settings: Settings) {
-        self.settings = settings
-    }
-
     /// Fetches candidate routes for `trip` and scores them against the recorded samples.
     func fetch(for trip: TripSummary) async {
+        fetchGeneration += 1
+        let gen = fetchGeneration
         activeTripID = trip.id
+        lastError = nil
         state = .fetching
 
         guard let mode = RefinementMode.map(recordedMode: trip.mode) else {
@@ -74,23 +77,11 @@ final class PathRefinementController {
         let samples = environment.map { Self.scoringSamples(forTrip: trip, environment: $0) } ?? []
 
         do {
-            let candidates: [RouteCandidate]
-            switch settings?.refinementProvider ?? .apple {
-            case .apple:
-                candidates = try await appleRouter.fetchCandidates(
-                    start: trip.startCoordinate,
-                    end: trip.endCoordinate,
-                    mode: mode
-                )
-            case .google:
-                let key = settings?.googleDirectionsAPIKey ?? ""
-                candidates = try await googleRouter.fetchCandidates(
-                    start: trip.startCoordinate,
-                    end: trip.endCoordinate,
-                    mode: mode,
-                    apiKey: key
-                )
-            }
+            let candidates = try await router.fetchCandidates(
+                start: trip.startCoordinate,
+                end: trip.endCoordinate,
+                mode: mode
+            )
             let scored = candidates.map { candidate in
                 ScoredCandidate(
                     candidate: candidate,
@@ -98,7 +89,7 @@ final class PathRefinementController {
                 )
             }
             // Sort by composite score (best first). Candidates with `nil` score (no samples)
-            // keep the order Apple Maps returned them in.
+            // keep the order the routing service returned them in.
             let sorted = scored.sorted { a, b in
                 switch (a.score, b.score) {
                 case let (.some(lhs), .some(rhs)): lhs.composite < rhs.composite
@@ -107,8 +98,11 @@ final class PathRefinementController {
                 case (.none, .none): false
                 }
             }
+            guard gen == fetchGeneration else { return }
             state = .ready(scored: sorted)
         } catch {
+            guard gen == fetchGeneration else { return }
+            lastError = error as? RoutingError ?? .other(error.localizedDescription)
             state = .failed(error.localizedDescription)
         }
     }
@@ -127,8 +121,7 @@ final class PathRefinementController {
         originalPointCount: Int
     ) async -> Bool {
         guard let environment, let database = environment.openDatabase() else { return false }
-        let provider = settings?.refinementProvider ?? .apple
-        let source = provider == .google ? "google_maps" : "apple_maps"
+        let source = "google_maps"
         let originalSamples = environment.recordedSamples(forTrip: trip)
         let record = RefinementRecord(
             eventID: trip.id,
@@ -150,7 +143,7 @@ final class PathRefinementController {
             if candidate.isMultiModal {
                 let legs = candidate.segments.map { segment in
                     LegInput(
-                        mode: segment.mode.rawValue,
+                        mode: segment.displayMode,
                         label: segment.label,
                         coordinates: segment.coordinates,
                         distanceMeters: segment.distanceMeters ?? 0,
@@ -202,7 +195,10 @@ final class PathRefinementController {
     /// start → last trip's end) using the provider-appropriate mode. Scoring concatenates
     /// every recorded leg's GPS samples for a holistic similarity score.
     func fetch(for journey: Journey) async {
+        fetchGeneration += 1
+        let gen = fetchGeneration
         activeTripID = journey.trips.first?.id
+        lastError = nil
         state = .fetching
 
         // Mode selection: any transit leg → transit; else first mappable mode; fallback walking.
@@ -214,23 +210,11 @@ final class PathRefinementController {
         }
 
         do {
-            let candidates: [RouteCandidate]
-            switch settings?.refinementProvider ?? .apple {
-            case .apple:
-                candidates = try await appleRouter.fetchCandidates(
-                    start: journey.startCoordinate,
-                    end: journey.endCoordinate,
-                    mode: mode
-                )
-            case .google:
-                let key = settings?.googleDirectionsAPIKey ?? ""
-                candidates = try await googleRouter.fetchCandidates(
-                    start: journey.startCoordinate,
-                    end: journey.endCoordinate,
-                    mode: mode,
-                    apiKey: key
-                )
-            }
+            let candidates = try await router.fetchCandidates(
+                start: journey.startCoordinate,
+                end: journey.endCoordinate,
+                mode: mode
+            )
             let scored = candidates.map { candidate in
                 ScoredCandidate(
                     candidate: candidate,
@@ -245,8 +229,11 @@ final class PathRefinementController {
                 case (.none, .none): false
                 }
             }
+            guard gen == fetchGeneration else { return }
             state = .ready(scored: sorted)
         } catch {
+            guard gen == fetchGeneration else { return }
+            lastError = error as? RoutingError ?? .other(error.localizedDescription)
             state = .failed(error.localizedDescription)
         }
     }
@@ -268,8 +255,7 @@ final class PathRefinementController {
               let primaryTrip = journey.trips.first
         else { return false }
 
-        let provider = settings?.refinementProvider ?? .apple
-        let source = provider == .google ? "google_maps" : "apple_maps"
+        let source = "google_maps"
         let originalSamples = journey.trips.flatMap { environment.recordedSamples(forTrip: $0) }
 
         let legs: [LegInput] = candidate.segments.map { segment in
@@ -339,10 +325,11 @@ final class PathRefinementController {
         }
         let startMismatch = PolylineDirection.haversineMeters(trip.startCoordinate, first)
         let endMismatch = PolylineDirection.haversineMeters(trip.endCoordinate, last)
-        // 1.5 km matches the heal threshold in AppEnvironment — keeps the two layers in
-        // sync. If a heal happened on this trip, the recorded samples are unreliable
-        // (sparse, partial); endpoint-only scoring is the right signal.
-        if startMismatch > 1_500 || endMismatch > 1_500 {
+        // Same threshold as AppEnvironment's heal — single source of truth (L39). If a heal
+        // happened on this trip, the recorded samples are unreliable (sparse, partial);
+        // endpoint-only scoring is the right signal.
+        let threshold = AppEnvironment.healMismatchThresholdMeters
+        if startMismatch > threshold || endMismatch > threshold {
             return [trip.startCoordinate, trip.endCoordinate]
         }
         return recorded

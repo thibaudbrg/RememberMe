@@ -316,7 +316,7 @@ public extension Persistence {
         let checkStmt = try database.prepare("SELECT 1 FROM path_points_original WHERE event_id = ? LIMIT 1;")
         defer { checkStmt.finalize() }
         try checkStmt.bind(1, text: eventID.uuidString)
-        if checkStmt.step() == .row { return }
+        if try checkStmt.step() == .row { return }
 
         let insertStmt = try database.prepare("""
             INSERT INTO path_points_original (event_id, seq, offset_min, lat, lon)
@@ -373,7 +373,7 @@ public extension Persistence {
         """)
         defer { stmt.finalize() }
         try stmt.bind(1, text: eventID.uuidString)
-        guard stmt.step() == .row else { return nil }
+        guard try stmt.step() == .row else { return nil }
         return ParentEventInfo(
             startTs: stmt.columnInt64(0),
             startTzOffsetMin: stmt.columnInt(1),
@@ -573,21 +573,23 @@ public extension Persistence {
             SELECT pr.event_id
             FROM path_refinements pr
             JOIN events e ON e.id = pr.event_id
-            WHERE e.start_ts >= ? AND e.start_ts < ?
+            WHERE e.start_ts < ? AND (e.end_ts > ? OR e.start_ts >= ?)
             UNION
             SELECT id
             FROM events
             WHERE kind = 'activity'
               AND derived_from_event_id IS NOT NULL
-              AND start_ts >= ? AND start_ts < ?;
+              AND start_ts < ? AND (end_ts > ? OR start_ts >= ?);
         """)
         defer { stmt.finalize() }
-        try stmt.bind(1, int64: start)
-        try stmt.bind(2, int64: end)
+        try stmt.bind(1, int64: end)
+        try stmt.bind(2, int64: start)
         try stmt.bind(3, int64: start)
         try stmt.bind(4, int64: end)
+        try stmt.bind(5, int64: start)
+        try stmt.bind(6, int64: start)
         var result: Set<UUID> = []
-        while stmt.step() == .row {
+        while try stmt.step() == .row {
             if let text = stmt.columnText(0), let id = UUID(uuidString: text) {
                 result.insert(id)
             }
@@ -611,40 +613,20 @@ public extension Persistence {
             JOIN events e ON e.id = pp.event_id
             WHERE e.kind = 'activity'
               AND e.is_superseded = 0
-              AND e.start_ts >= ? AND e.start_ts < ?
+              AND e.start_ts < ? AND (e.end_ts > ? OR e.start_ts >= ?)
             ORDER BY pp.event_id, pp.seq;
         """)
         defer { stmt.finalize() }
-        try stmt.bind(1, int64: start)
-        try stmt.bind(2, int64: end)
+        try stmt.bind(1, int64: end)
+        try stmt.bind(2, int64: start)
+        try stmt.bind(3, int64: start)
         var result: [UUID: [Coordinate]] = [:]
-        while stmt.step() == .row {
+        while try stmt.step() == .row {
             guard let idText = stmt.columnText(0), let id = UUID(uuidString: idText) else { continue }
             let coord = Coordinate(latitude: stmt.columnDouble(1), longitude: stmt.columnDouble(2))
             result[id, default: []].append(coord)
         }
         return result
-    }
-
-    /// Original GPS samples for a refined event (the snapshot taken on first apply).
-    /// Returns an empty array when the event has not been refined.
-    static func fetchOriginalPathPoints(
-        in database: SQLCipherDatabase,
-        eventID: UUID
-    ) throws -> [Coordinate] {
-        let stmt = try database.prepare("""
-            SELECT lat, lon
-            FROM path_points_original
-            WHERE event_id = ?
-            ORDER BY seq ASC;
-        """)
-        defer { stmt.finalize() }
-        try stmt.bind(1, text: eventID.uuidString)
-        var points: [Coordinate] = []
-        while stmt.step() == .row {
-            points.append(Coordinate(latitude: stmt.columnDouble(0), longitude: stmt.columnDouble(1)))
-        }
-        return points
     }
 
     /// Returns the event id of the parent activity if `eventID` is a derived sub-activity
@@ -654,7 +636,7 @@ public extension Persistence {
         let stmt = try database.prepare("SELECT derived_from_event_id FROM events WHERE id = ?;")
         defer { stmt.finalize() }
         try stmt.bind(1, text: eventID.uuidString)
-        guard stmt.step() == .row, let text = stmt.columnText(0) else { return nil }
+        guard try stmt.step() == .row, let text = stmt.columnText(0) else { return nil }
         return UUID(uuidString: text)
     }
 
@@ -671,27 +653,8 @@ public extension Persistence {
         """)
         defer { stmt.finalize() }
         try stmt.bind(1, text: eventID.uuidString)
-        guard stmt.step() == .row else { return nil }
+        guard try stmt.step() == .row else { return nil }
         return makeRecord(from: stmt)
-    }
-
-    static func fetchRefinements(in database: SQLCipherDatabase) throws -> [RefinementRecord] {
-        let stmt = try database.prepare("""
-            SELECT
-                event_id, refined_at, source, route_name, transport_type,
-                similarity_mean_m, similarity_p95_m, similarity_max_m,
-                expected_travel_s, expected_distance_m,
-                candidate_count, chosen_index, original_point_count, refined_point_count,
-                journey_member_ids
-            FROM path_refinements
-            ORDER BY refined_at DESC;
-        """)
-        defer { stmt.finalize() }
-        var records: [RefinementRecord] = []
-        while stmt.step() == .row {
-            if let record = makeRecord(from: stmt) { records.append(record) }
-        }
-        return records
     }
 
     // MARK: - Skips
@@ -720,14 +683,14 @@ public extension Persistence {
         let stmt = try database.prepare("SELECT 1 FROM path_refinement_skips WHERE event_id = ? LIMIT 1;")
         defer { stmt.finalize() }
         try stmt.bind(1, text: eventID.uuidString)
-        return stmt.step() == .row
+        return try stmt.step() == .row
     }
 
     static func skipReason(in database: SQLCipherDatabase, eventID: UUID) throws -> SkipReason? {
         let stmt = try database.prepare("SELECT reason FROM path_refinement_skips WHERE event_id = ?;")
         defer { stmt.finalize() }
         try stmt.bind(1, text: eventID.uuidString)
-        guard stmt.step() == .row, let raw = stmt.columnText(0) else { return nil }
+        guard try stmt.step() == .row, let raw = stmt.columnText(0) else { return nil }
         return SkipReason(rawValue: raw)
     }
 
@@ -735,11 +698,10 @@ public extension Persistence {
 
     private static func makeRecord(from stmt: PreparedStatement) -> RefinementRecord? {
         guard let idText = stmt.columnText(0), let id = UUID(uuidString: idText) else { return nil }
-        let travel = stmt.columnDouble(8)
-        let distance = stmt.columnDouble(9)
-        // SQLite returns 0 for NULL doubles; we treat 0 as "no value" only when the column was
-        // explicitly nullable. For travel/distance we only ever bind from Optional<Double>; if
-        // the underlying value is 0 we accept it as-is.
+        // expected_travel_s / expected_distance_m are nullable: a NULL column means "no value",
+        // so read it back as nil rather than the 0.0 that columnDouble returns for NULL.
+        let travel = stmt.columnIsNull(8) ? nil : stmt.columnDouble(8)
+        let distance = stmt.columnIsNull(9) ? nil : stmt.columnDouble(9)
         let memberIDs: [UUID]? = stmt.columnText(14).flatMap { raw in
             let parts = raw.split(separator: ",").compactMap { UUID(uuidString: String($0)) }
             return parts.isEmpty ? nil : parts

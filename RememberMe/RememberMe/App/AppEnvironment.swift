@@ -12,40 +12,44 @@ import Persistence
 /// - `counts`, `importStatus`: observed by the SwiftUI tree
 @MainActor
 @Observable
-public final class AppEnvironment {
-    public enum ImportStatus: Equatable, Sendable {
+final class AppEnvironment {
+    enum ImportStatus: Equatable, Sendable {
         case idle
         case running(stage: String)
-        case completed(Persistence.EventCounts, skipped: Int)
+        /// `skipped` = malformed/undecodable records; `skippedOlder` = records dropped by
+        /// the free tier's 14-day import window (0 when Premium / no cutoff).
+        case completed(Persistence.EventCounts, skipped: Int, skippedOlder: Int)
         case failed(message: String)
     }
 
     private let keyStore: any KeyStore
     private let databasePath: String
     private var database: SQLCipherDatabase?
-    public private(set) var geocoder: GeocodingService?
+    private(set) var geocoder: GeocodingService?
     let pathRefinement: PathRefinementController = PathRefinementController()
 
-    public var counts: Persistence.EventCounts = .empty
-    public var insights: InsightsSummary = .empty
-    public var visitMarkers: [VisitMarker] = []
-    public var recentTrips: [TripSummary] = []
-    public var timeline: [TimelineEntry] = []
-    public var selectedPlace: VisitMarker?
-    public var importStatus: ImportStatus = .idle
+    /// App-lifetime live background tracker. Created eagerly so SLC / visit
+    /// callbacks delivered to the app on background-relaunch land on a live
+    /// instance. See `LocationTracker` for the state machine bridge.
+    let tracker: LocationTracker = LocationTracker()
+
+    var counts: Persistence.EventCounts = .empty
+    var insights: InsightsSummary = .empty
+    var selectedPlace: VisitMarker?
+    var importStatus: ImportStatus = .idle
 
     // MARK: - Day filter (round 5)
 
     /// Currently selected calendar day (anchor) in the user's local timezone, at midnight.
     /// Combined with `selectedRange` this drives the visible date range on the map + timeline.
-    public var selectedDay: Date = Calendar.current.startOfDay(for: Date())
+    var selectedDay: Date = Calendar.current.startOfDay(for: Date())
 
     /// How wide a date range the user is viewing.
-    public enum DateRangeKind: String, Equatable, Sendable, CaseIterable, Identifiable {
+    enum DateRangeKind: String, Equatable, Sendable, CaseIterable, Identifiable {
         case day, week, month
-        public var id: String { rawValue }
+        var id: String { rawValue }
 
-        public var label: String {
+        var label: String {
             switch self {
             case .day: "Day"
             case .week: "Week"
@@ -54,53 +58,74 @@ public final class AppEnvironment {
         }
     }
 
-    public var selectedRange: DateRangeKind = .day
+    var selectedRange: DateRangeKind = .day
 
     /// Days that have at least one event. Used by the calendar UI to mark them with a dot
     /// and to pick a sensible default day when "today" is empty.
-    public var daysWithData: [Date] = []
+    var daysWithData: [Date] = []
 
-    public var dayMarkers: [VisitMarker] = []
-    public var dayTrips: [TripSummary] = []
-    public var dayPathTraces: [PathTrace] = []
+    var dayMarkers: [VisitMarker] = []
+    var dayTrips: [TripSummary] = []
+    var dayPathTraces: [PathTrace] = []
     /// Per-activity refined polylines for the current day. Populated by `loadDay` from
     /// `path_points` rows keyed under activity ids — these only exist after a refinement
     /// (single-leg via `applyRefinement`, or each leg of a multi-leg split). Empty for
     /// activities that have not been refined; those fall back to time-sliced GPS samples.
-    public var dayRefinedPolylines: [UUID: [Coordinate]] = [:]
+    var dayRefinedPolylines: [UUID: [Coordinate]] = [:]
     /// Set of activity event ids for the current day that have been refined (single-trip
     /// audit row, or derived sub-activity from a multi-leg / journey refinement). Drives
     /// the small green check shown on the timeline mode icon so the user can scan a day
     /// at a glance and see which rows have been touched.
-    public var dayRefinedActivityIDs: Set<UUID> = []
+    var dayRefinedActivityIDs: Set<UUID> = []
     /// Precomputed multi-leg journeys for the current day, keyed by every activity id
     /// that participates as a leg. Lets the timeline context-menu look up the journey
     /// instantly instead of running the detector inside the SwiftUI closure (which
     /// caused lag and intermittent "missing menu item" bugs).
     var dayJourneysByAnchor: [UUID: Journey] = [:]
-    public var dayTimeline: [TimelineEntry] = []
-    public var daySummary: DaySummary = .empty
+    var dayTimeline: [TimelineEntry] = []
+    var daySummary: DaySummary = .empty
+
+    /// Polylines to draw for the current day, computed once in `loadDay` from
+    /// `dayPathTraces` / `dayTrips` / `dayRefinedPolylines`. MapScreen reads these directly
+    /// instead of recomputing the O(activities × paths × samples) plan inside its `body`
+    /// (which re-ran on every camera gesture).
+    var dayTripRenders: [TripRenderPlan.PolylineRender] = []
+    /// Sparse direction-of-travel markers along `dayTripRenders`, computed alongside it.
+    var dayDirectionMarkers: [DirectionMarker] = []
 
     /// Photos taken on the selected day (only populated when the user enabled the toggle and
     /// granted Photos library access). Empty otherwise.
-    public var dayPhotos: [GeoPhoto] = []
-    public let photoLibrary = PhotoLibraryService()
+    var dayPhotos: [GeoPhoto] = []
+    let photoLibrary = PhotoLibraryService()
+
+    /// Ids of timeline entries that have a nearby photo. Precomputed when `dayTimeline` or
+    /// `dayPhotos` change so the eager timeline VStack does an O(1) `Set` lookup per row
+    /// instead of re-running the O(photos) `hasNearbyPhoto` scan on every render (M26).
+    private(set) var entryIDsWithNearbyPhotos: Set<TimelineEntry.ID> = []
+
+    private func recomputeEntryIDsWithNearbyPhotos() {
+        guard !dayPhotos.isEmpty else {
+            entryIDsWithNearbyPhotos = []
+            return
+        }
+        entryIDsWithNearbyPhotos = Set(dayTimeline.filter { hasNearbyPhoto(for: $0) }.map(\.id))
+    }
 
     // MARK: - Navigation (round 6)
 
     /// One frame of the navigation history. Capturing what the drawer should restore on "Back".
-    public struct NavigationSnapshot: Equatable, Sendable {
-        public let day: Date
-        public let drawerTab: DrawerTab
-        public let focusedItem: MapFocusItem?
-        public init(day: Date, drawerTab: DrawerTab, focusedItem: MapFocusItem?) {
+    struct NavigationSnapshot: Equatable, Sendable {
+        let day: Date
+        let drawerTab: DrawerTab
+        let focusedItem: MapFocusItem?
+        init(day: Date, drawerTab: DrawerTab, focusedItem: MapFocusItem?) {
             self.day = day
             self.drawerTab = drawerTab
             self.focusedItem = focusedItem
         }
     }
 
-    public enum DrawerTab: String, Equatable, Sendable, CaseIterable {
+    enum DrawerTab: String, Equatable, Sendable, CaseIterable {
         case timeline
         case photos
         case insights
@@ -108,24 +133,24 @@ public final class AppEnvironment {
 
     /// What the map should currently focus on. Set when the user taps a timeline row;
     /// cleared on day change or back-navigation.
-    public enum MapFocusItem: Equatable, Sendable {
+    enum MapFocusItem: Equatable, Sendable {
         case visit(placeID: String, coordinate: Coordinate)
         case trip(id: UUID)
         case path(id: UUID)
         case photo(id: String, coordinate: Coordinate)
     }
 
-    public var drawerTab: DrawerTab = .timeline
-    public var focusedItem: MapFocusItem?
-    public private(set) var navigationStack: [NavigationSnapshot] = []
+    var drawerTab: DrawerTab = .timeline
+    var focusedItem: MapFocusItem?
+    private(set) var navigationStack: [NavigationSnapshot] = []
 
     /// Coarse drawer state — small (peek), medium, large.
-    public enum DrawerSize: String, Equatable, Sendable, CaseIterable {
+    enum DrawerSize: String, Equatable, Sendable, CaseIterable {
         case small, medium, large
 
         /// Approximate drawer height in points for a given screen height.
         /// `small` is the fixed peek detent we use in RootView (`.height(180)`).
-        public func heightInPoints(screenHeight: CGFloat) -> CGFloat {
+        func heightInPoints(screenHeight: CGFloat) -> CGFloat {
             switch self {
             case .small: 180
             case .medium: screenHeight * 0.5
@@ -134,14 +159,14 @@ public final class AppEnvironment {
         }
     }
 
-    public var drawerSize: DrawerSize = .small
+    var drawerSize: DrawerSize = .small
 
     /// Session-only filter applied to the timeline list (does not affect the map).
-    public enum TimelineFilter: String, Equatable, Sendable, CaseIterable, Identifiable {
+    enum TimelineFilter: String, Equatable, Sendable, CaseIterable, Identifiable {
         case all, trips, visits, walking, vehicle, transit
-        public var id: String { rawValue }
+        var id: String { rawValue }
 
-        public var label: String {
+        var label: String {
             switch self {
             case .all: "All"
             case .trips: "Trips"
@@ -153,7 +178,7 @@ public final class AppEnvironment {
         }
 
         /// True if the given `TimelineEntry` passes this filter.
-        public func matches(_ entry: TimelineEntry) -> Bool {
+        func matches(_ entry: TimelineEntry) -> Bool {
             switch self {
             case .all:
                 true
@@ -177,25 +202,25 @@ public final class AppEnvironment {
         }
     }
 
-    public var timelineFilter: TimelineFilter = .all
+    var timelineFilter: TimelineFilter = .all
 
     /// `dayTimeline` filtered by `timelineFilter`. Computed so callers can subscribe to changes
     /// in either the source list or the filter without manual refresh code.
-    public var filteredDayTimeline: [TimelineEntry] {
+    var filteredDayTimeline: [TimelineEntry] {
         guard timelineFilter != .all else { return dayTimeline }
         return dayTimeline.filter(timelineFilter.matches)
     }
 
     /// Visible events in the day timeline list. Path rows are hidden because the map already
     /// draws them as the trip line.
-    public var visibleDayEvents: [TimelineEntry] {
+    var visibleDayEvents: [TimelineEntry] {
         filteredDayTimeline.filter { $0.kind != "path" }
     }
 
     /// `dayMarkers` collapsed so repeated visits to the same named place within a short
     /// window only show one dot on the map. Trips, paths, and timeline rows are unaffected —
     /// only the visible point markers.
-    public var dedupedDayMarkers: [VisitMarker] {
+    var dedupedDayMarkers: [VisitMarker] {
         dedupMarkersByLabel(dayMarkers, within: 600) // 10 min
     }
 
@@ -232,7 +257,7 @@ public final class AppEnvironment {
 
     /// Returns true if `dayPhotos` contains at least one photo within `closeBySeconds` and
     /// `closeByMeters` of `entry`'s window. Used to flag a small photo indicator on event rows.
-    public func hasNearbyPhoto(for entry: TimelineEntry, closeBySeconds: TimeInterval = 1_800, closeByMeters: Double = 300) -> Bool {
+    func hasNearbyPhoto(for entry: TimelineEntry, closeBySeconds: TimeInterval = 1_800, closeByMeters: Double = 300) -> Bool {
         guard !dayPhotos.isEmpty else { return false }
         // For activities/visits, use the start coordinate where available.
         let referenceCoordinate: Coordinate?
@@ -260,20 +285,20 @@ public final class AppEnvironment {
         return false
     }
 
-    public var canGoBack: Bool {
+    var canGoBack: Bool {
         !navigationStack.isEmpty
     }
 
     // MARK: - Init
 
-    public init(keyStore: any KeyStore, databasePath: String) {
+    init(keyStore: any KeyStore, databasePath: String) {
         self.keyStore = keyStore
         self.databasePath = databasePath
         pathRefinement.bind(environment: self)
     }
 
     /// The production environment: real Keychain, real on-disk database under Application Support.
-    public static func live() -> AppEnvironment {
+    static func live() -> AppEnvironment {
         AppEnvironment(
             keyStore: KeychainKeyStore(),
             databasePath: defaultDatabasePath()
@@ -281,7 +306,7 @@ public final class AppEnvironment {
     }
 
     /// Preview / unit-test environment: in-memory key, in-memory database.
-    public static func preview() -> AppEnvironment {
+    static func preview() -> AppEnvironment {
         AppEnvironment(
             keyStore: InMemoryKeyStore(),
             databasePath: SQLCipherDatabase.inMemoryPath
@@ -292,7 +317,7 @@ public final class AppEnvironment {
 
     /// Opens (or creates) the encrypted database and refreshes published state.
     /// Idempotent — safe to call multiple times.
-    public func ensureOpen() async {
+    func ensureOpen() async {
         if database != nil { return }
         do {
             let opened = try DatabaseFactory.open(
@@ -301,6 +326,15 @@ public final class AppEnvironment {
                 excludeFromBackup: databasePath != SQLCipherDatabase.inMemoryPath
             )
             database = opened
+            // Apply file protection now that the DB file is guaranteed to exist. Idempotent.
+            // Done on every launch so existing users migrate from .complete to
+            // .completeUntilFirstUserAuthentication when they update to this build.
+            if databasePath != SQLCipherDatabase.inMemoryPath {
+                try? FileManager.default.setAttributes(
+                    [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+                    ofItemAtPath: databasePath
+                )
+            }
             geocoder = GeocodingService(database: opened) { [weak self] in
                 // Only the per-day timeline lookups need to repaint; map markers stay stable
                 // so the SwiftUI Map doesn't tear down and reload its tiles on every resolution.
@@ -316,6 +350,42 @@ public final class AppEnvironment {
             {
                 geocoder?.start()
             }
+
+            // Wire persistence into the live tracker now that the DB is open.
+            // Without this, openTrip / closeTrip actions log but don't persist.
+            let tripWriter = LiveTripWriter(database: opened)
+            tracker.bindPersistence(
+                writer: tripWriter,
+                onTripFinalised: { [weak self] in
+                    await self?.refresh()
+                }
+            )
+
+            // Phase 9: recover orphaned live-tracker path events from a previous
+            // run that crashed before their sibling activity could be written.
+            // For each orphan, write a placeholder activity (mode=unknown) from
+            // whatever path-point data survived so the trip is fully finalised
+            // and doesn't keep surfacing on every launch.
+            let recovered = await recoverOrphanedLiveTrips(writer: tripWriter)
+
+            // One-time hygiene for rows written by earlier builds: Null Island
+            // placeholder activities (the "Unknown 0m trip in the Atlantic")
+            // and duplicate visits from re-delivered CLVisit callbacks.
+            let removedNullIsland = (try? tripWriter.deleteNullIslandActivities()) ?? 0
+            let removedDuplicates = (try? tripWriter.dedupeLiveVisits()) ?? 0
+            if recovered + removedNullIsland + removedDuplicates > 0 {
+                Logger(subsystem: "com.tibo.rememberme", category: "recovery")
+                    .notice("cleanup: \(recovered) orphan(s) finalised, \(removedNullIsland) null-island activitie(s) and \(removedDuplicates) duplicate visit(s) removed")
+                await refresh()
+            }
+
+            // Resume live tracking if the user had it enabled in a previous session.
+            // Read UserDefaults directly so AppEnvironment stays independent of Settings.
+            // The tracker's state machine collapses back to .off if auth was revoked.
+            let trackingEnabled = UserDefaults.standard.bool(forKey: Settings.liveTrackingEnabledKey)
+            if trackingEnabled {
+                tracker.setEnabled(true)
+            }
         } catch {
             importStatus = .failed(message: "Couldn't open database: \(error.localizedDescription)")
         }
@@ -325,14 +395,11 @@ public final class AppEnvironment {
     /// Use after big writes (initial open, import). For granular updates after a single
     /// geocoded name lands, prefer `refreshDayTimeline()` so the SwiftUI `Map` doesn't
     /// reassign its markers array (which triggers a tile reload flash).
-    public func refresh() async {
+    func refresh() async {
         guard let database else { return }
         do {
             counts = try Persistence.eventCounts(in: database)
             insights = (try? Persistence.fetchInsights(in: database)) ?? .empty
-            visitMarkers = try Persistence.fetchVisitMarkers(in: database)
-            recentTrips = try Persistence.fetchRecentTrips(in: database)
-            timeline = try Persistence.fetchTimeline(in: database)
             daysWithData = try Persistence.fetchDaysWithData(in: database)
             // If today has nothing AND there is data elsewhere, snap to the most recent day.
             if let mostRecent = daysWithData.first,
@@ -350,25 +417,55 @@ public final class AppEnvironment {
     /// Refresh ONLY the day-filtered timeline list. Used by the geocoding background loop
     /// so newly-resolved place names appear in the visible timeline without provoking the
     /// `Map` view to re-render its annotations (which causes a brief map tile reload).
-    public func refreshDayTimeline() async {
+    func refreshDayTimeline() async {
         guard let database else { return }
-        dayTimeline = (try? Persistence.fetchTimeline(in: database, dayRange: dayRange)) ?? dayTimeline
+        let fresh = (try? Persistence.fetchTimeline(in: database, dayRange: dayRange)) ?? dayTimeline
+        // Skip the reassignment (and the dependent recompute + SwiftUI invalidation) when the
+        // timeline hasn't actually changed — the geocoding trickle calls this every ~1.2 s.
+        guard fresh != dayTimeline else { return }
+        dayTimeline = fresh
+        recomputeEntryIDsWithNearbyPhotos()
+    }
+
+    private static let loadDayLog = Logger(subsystem: "com.tibo.rememberme", category: "loadDay")
+
+    /// Runs `fetch`, returning `fallback` on error — but, unlike a bare `try?`, logs the
+    /// failure first so a blank day caused by a read error is diagnosable instead of looking
+    /// identical to "no data" (L56).
+    private func loggingFetch<T>(_ label: String, fallback: T, _ fetch: () throws -> T) -> T {
+        do {
+            return try fetch()
+        } catch {
+            Self.loadDayLog.error("\(label, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
+            return fallback
+        }
     }
 
     /// Re-fetches all per-day data (markers/trips/paths/timeline/summary) for the current
     /// `selectedDay`. Called on selection changes.
-    public func loadDay() async {
+    func loadDay() async {
         guard let database else { return }
         let range = dayRange
-        dayMarkers = (try? Persistence.fetchVisitMarkers(in: database, dayRange: range)) ?? []
-        let rawTrips = (try? Persistence.fetchTrips(in: database, dayRange: range)) ?? []
-        dayPathTraces = (try? Persistence.fetchPathTraces(in: database, dayRange: range)) ?? []
+        dayMarkers = loggingFetch("fetchVisitMarkers", fallback: []) { try Persistence.fetchVisitMarkers(in: database, dayRange: range) }
+        let rawTrips = loggingFetch("fetchTrips", fallback: []) { try Persistence.fetchTrips(in: database, dayRange: range) }
+        dayPathTraces = loggingFetch("fetchPathTraces", fallback: []) { try Persistence.fetchPathTraces(in: database, dayRange: range) }
         // Heal trips whose Google metadata is clearly wrong (endpoints + distance that
         // don't match the path samples). Render-time only — DB is untouched.
         dayTrips = rawTrips.map { Self.heal(trip: $0, withPaths: dayPathTraces) }
-        dayRefinedPolylines = (try? Persistence.fetchActivityPolylines(in: database, dayRange: range)) ?? [:]
-        dayRefinedActivityIDs = (try? Persistence.fetchRefinedActivityIDs(in: database, dayRange: range)) ?? []
-        let rawTimeline = (try? Persistence.fetchTimeline(in: database, dayRange: range)) ?? []
+        dayRefinedPolylines = loggingFetch("fetchActivityPolylines", fallback: [:]) { try Persistence.fetchActivityPolylines(in: database, dayRange: range) }
+        dayRefinedActivityIDs = loggingFetch("fetchRefinedActivityIDs", fallback: []) { try Persistence.fetchRefinedActivityIDs(in: database, dayRange: range) }
+        // Compute the polyline render plan + direction markers once per data change so the
+        // map's body doesn't re-run the O(activities × paths × samples) pipeline on every
+        // camera gesture (M22).
+        dayTripRenders = TripRenderPlan.renders(
+            paths: dayPathTraces,
+            activities: dayTrips,
+            refinedByActivity: dayRefinedPolylines
+        )
+        dayDirectionMarkers = dayTripRenders.flatMap { render in
+            PolylineDirection.markers(for: render.coordinates, polylineID: render.id)
+        }
+        let rawTimeline = loggingFetch("fetchTimeline", fallback: []) { try Persistence.fetchTimeline(in: database, dayRange: range) }
         // Apply the same render-time heal to timeline rows so the "13.8 km" label on
         // a corrupted Google activity matches the corrected distance on the trip detail
         // screen + the polyline on the map.
@@ -388,8 +485,9 @@ public final class AppEnvironment {
                 detail: .activity(distanceMeters: healed.distanceMeters, mode: mode)
             )
         }
-        daySummary = (try? Persistence.fetchDaySummary(in: database, dayRange: range)) ?? .empty
+        daySummary = loggingFetch("fetchDaySummary", fallback: .empty) { try Persistence.fetchDaySummary(in: database, dayRange: range) }
         dayJourneysByAnchor = precomputeJourneys(trips: dayTrips, timeline: dayTimeline)
+        recomputeEntryIDsWithNearbyPhotos()
         // dayPhotos is loaded separately by MapScreen when its toggle is on (we don't want
         // to ask for Photos access from this layer; the view decides when).
     }
@@ -398,9 +496,10 @@ public final class AppEnvironment {
 
     /// Fetches day photos when the user has the toggle on and granted access. Safe to call
     /// even when the toggle is off — it just clears the array.
-    public func loadDayPhotos(enabled: Bool) async {
+    func loadDayPhotos(enabled: Bool) async {
         guard enabled else {
             dayPhotos = []
+            recomputeEntryIDsWithNearbyPhotos()
             return
         }
         let status = await photoLibrary.ensureAuthorized()
@@ -408,16 +507,18 @@ public final class AppEnvironment {
         Self.photosLog.notice("loadDayPhotos enabled=\(enabled, privacy: .public) auth=\(String(describing: status), privacy: .public) start=\(range.lowerBound, privacy: .public) end=\(range.upperBound, privacy: .public)")
         guard status == .authorized || status == .limited else {
             dayPhotos = []
+            recomputeEntryIDsWithNearbyPhotos()
             return
         }
         let photos = await photoLibrary.photos(in: range)
         Self.photosLog.notice("fetched \(photos.count, privacy: .public) photos for selectedDay=\(self.selectedDay, privacy: .public)")
         dayPhotos = photos
+        recomputeEntryIDsWithNearbyPhotos()
     }
 
     /// Sets the selected day and re-fetches day data. Clears any focused map item
     /// (the map will fit to the new day's overall data).
-    public func selectDay(_ date: Date) async {
+    func selectDay(_ date: Date) async {
         selectedDay = calendar.startOfDay(for: date)
         focusedItem = nil
         await loadDay()
@@ -427,7 +528,7 @@ public final class AppEnvironment {
 
     /// Pushes the current state on the stack and applies the supplied destination.
     /// Used by the timeline "Recent visits" rows that jump to another day.
-    public func navigate(toDay day: Date, tab: DrawerTab = .timeline, focusing focus: MapFocusItem? = nil) async {
+    func navigate(toDay day: Date, tab: DrawerTab = .timeline, focusing focus: MapFocusItem? = nil) async {
         navigationStack.append(NavigationSnapshot(day: selectedDay, drawerTab: drawerTab, focusedItem: focusedItem))
         drawerTab = tab
         focusedItem = focus
@@ -439,16 +540,30 @@ public final class AppEnvironment {
 
     /// Sets the map's focused item without changing the day or pushing history.
     /// Used when tapping a timeline row in the current day's list.
-    public func focus(_ item: MapFocusItem) {
+    func focus(_ item: MapFocusItem) {
         focusedItem = item
     }
 
-    public func clearFocus() {
+    /// When true, the next `clearFocus()` is swallowed and resets the flag. Set right before
+    /// dismissing a sheet that has *intentionally* set a new focus (e.g. PlaceDetailView's
+    /// "jump to visit" / photo-strip tap), so the sheet's `onDismiss` clearFocus doesn't race
+    /// it and wipe the focus the user just asked for (M24).
+    private var suppressFocusClearOnce = false
+
+    func suppressNextFocusClear() {
+        suppressFocusClearOnce = true
+    }
+
+    func clearFocus() {
+        if suppressFocusClearOnce {
+            suppressFocusClearOnce = false
+            return
+        }
         focusedItem = nil
     }
 
     /// Pops the top frame of the navigation stack and restores its state.
-    public func goBack() async {
+    func goBack() async {
         guard let previous = navigationStack.popLast() else { return }
         drawerTab = previous.drawerTab
         focusedItem = previous.focusedItem
@@ -467,7 +582,7 @@ public final class AppEnvironment {
     ///   - `.day`   → the single day starting at `selectedDay`
     ///   - `.week`  → the calendar week containing `selectedDay`
     ///   - `.month` → the calendar month containing `selectedDay`
-    public var dayRange: Range<Date> {
+    var dayRange: Range<Date> {
         let start: Date
         let end: Date
         switch selectedRange {
@@ -490,13 +605,13 @@ public final class AppEnvironment {
         return start ..< end
     }
 
-    public func selectRange(_ kind: DateRangeKind) async {
+    func selectRange(_ kind: DateRangeKind) async {
         selectedRange = kind
         await loadDay()
     }
 
     /// Steps the anchor day forward / backward by one range unit.
-    public func stepRange(by direction: Int) async {
+    func stepRange(by direction: Int) async {
         let component: Calendar.Component = switch selectedRange {
         case .day: .day
         case .week: .weekOfYear
@@ -509,9 +624,23 @@ public final class AppEnvironment {
 
     // MARK: - Import
 
+    /// Removes the document picker's `asCopy` temporary file once we're done reading it. Only
+    /// touches files the picker dropped under the app's temporary directory (multi-hundred-MB
+    /// Takeout copies otherwise linger until iOS's tmp cleanup) — never the user's original.
+    private func cleanUpPickerCopy(_ url: URL) {
+        let tmp = FileManager.default.temporaryDirectory.standardizedFileURL.path
+        guard url.standardizedFileURL.path.hasPrefix(tmp) else { return }
+        try? FileManager.default.removeItem(at: url)
+    }
+
     /// Decodes a Google Takeout `location-history.json` at `url` and writes everything into the DB.
     /// The heavy lifting happens off the main actor.
-    public func importTakeout(from url: URL) async {
+    ///
+    /// `cutoff` implements the free tier's import window: events that *end* before it are
+    /// counted but not written (callers pass `now - 14 days` when Premium isn't owned, `nil`
+    /// when it is). Re-importing the same file after upgrading is safe — event IDs are
+    /// deterministic and the writer dedupes, so only the older records are added.
+    func importTakeout(from url: URL, cutoff: Date? = nil) async {
         await ensureOpen()
         guard let database else { return }
 
@@ -520,23 +649,33 @@ public final class AppEnvironment {
         // The file picker hands us a security-scoped URL — we must open the scope before reading.
         let needsScope = url.startAccessingSecurityScopedResource()
         defer { if needsScope { url.stopAccessingSecurityScopedResource() } }
+        // Drop the picker's tmp copy once we've finished reading it (runs after the scope stop).
+        defer { cleanUpPickerCopy(url) }
 
         do {
             importStatus = .running(stage: "Decoding…")
-            let decoded = try await Task.detached(priority: .userInitiated) {
-                let data = try Data(contentsOf: url)
-                return try GoogleTakeoutDecoder().decode(data)
-            }.value
-
-            importStatus = .running(stage: "Writing \(decoded.events.count) events…")
             let writer = EventWriter(database: database)
-            let written = try await Task.detached(priority: .userInitiated) {
-                try writer.write(decoded.events)
+            // Stream the file: map the raw bytes (so they stay clean/paged out instead of
+            // fully resident) and decode record-by-record, flushing each batch to the writer.
+            // Peak memory is one record slice + one batch, not file + [Wire] + [Event] — large
+            // multi-hundred-MB Takeout files no longer get jetsam-killed (M28).
+            let (skippedCount, skippedOlderCount) = try await Task.detached(priority: .userInitiated) {
+                let data = try Data(contentsOf: url, options: .mappedIfSafe)
+                var skippedOlder = 0
+                let skipped = try GoogleTakeoutDecoder().decodeStreaming(data) { batch in
+                    if let cutoff {
+                        let kept = batch.filter { $0.end.date >= cutoff }
+                        skippedOlder += batch.count - kept.count
+                        if !kept.isEmpty { try writer.write(kept) }
+                    } else {
+                        try writer.write(batch)
+                    }
+                }
+                return (skipped.count, skippedOlder)
             }.value
 
             await refresh()
-            importStatus = .completed(counts, skipped: decoded.skipped.count)
-            _ = written
+            importStatus = .completed(counts, skipped: skippedCount, skippedOlder: skippedOlderCount)
 
             // Once new visits land, start filling in names in the background.
             geocoder?.start()
@@ -547,21 +686,21 @@ public final class AppEnvironment {
 
     // MARK: - Encrypted export / import
 
-    public enum ExportStatus: Equatable, Sendable {
+    enum ExportStatus: Equatable, Sendable {
         case idle
         case running(stage: String)
         case completed(url: URL, eventCount: Int)
         case failed(message: String)
     }
 
-    public var exportStatus: ExportStatus = .idle
+    var exportStatus: ExportStatus = .idle
 
     /// Dumps the DB, seals it under `passphrase`, and writes the result to a
     /// `.rmex` file in the app's tmp directory. Returns the file URL on success so the
     /// caller can present a ShareSheet. The file is short-lived — once shared, the
     /// caller (or iOS's tmp cleanup) can drop it.
     @discardableResult
-    public func exportEncrypted(passphrase: String) async -> URL? {
+    func exportEncrypted(passphrase: String) async -> URL? {
         await ensureOpen()
         guard let database else {
             exportStatus = .failed(message: "Database is not open.")
@@ -569,7 +708,12 @@ public final class AppEnvironment {
         }
         exportStatus = .running(stage: "Collecting…")
         do {
-            let payload = try Persistence.fetchExportPayload(in: database)
+            // fetchExportPayload walks the whole DB; keep it off the main actor so large
+            // histories don't freeze the UI (watchdog risk). Same detached pattern as
+            // importEncrypted's restore.
+            let payload = try await Task.detached(priority: .userInitiated) { [database] in
+                try Persistence.fetchExportPayload(in: database)
+            }.value
             let eventCount = payload.events.count
             exportStatus = .running(stage: "Encrypting \(eventCount) events…")
 
@@ -598,7 +742,7 @@ public final class AppEnvironment {
     /// payload, and restores it additively (OR IGNORE on primary keys). Returns the
     /// number of new event rows that landed.
     @discardableResult
-    public func importEncrypted(from url: URL, passphrase: String) async -> Int {
+    func importEncrypted(from url: URL, passphrase: String) async -> Int {
         await ensureOpen()
         guard let database else {
             exportStatus = .failed(message: "Database is not open.")
@@ -608,6 +752,8 @@ public final class AppEnvironment {
 
         let needsScope = url.startAccessingSecurityScopedResource()
         defer { if needsScope { url.stopAccessingSecurityScopedResource() } }
+        // Drop the picker's tmp copy once we've finished reading it (runs after the scope stop).
+        defer { cleanUpPickerCopy(url) }
 
         do {
             let data = try Data(contentsOf: url)
@@ -655,14 +801,68 @@ public final class AppEnvironment {
     // MARK: - Place detail support
 
     /// Fetches the visit history for the selected place. Caller refreshes when needed.
-    public func visitHistory(for placeID: String) -> [VisitHistoryItem] {
+    func visitHistory(for placeID: String) -> [VisitHistoryItem] {
         guard let database else { return [] }
         return (try? Persistence.fetchVisitHistory(in: database, placeID: placeID)) ?? []
     }
 
+    // MARK: - Phase 9: orphan recovery
+
+    /// Finds path events from the live tracker that were never paired with an
+    /// activity event (meaning the trip didn't finish cleanly — app crash, OS
+    /// kill mid-trip, etc.) and writes a placeholder `unknown`-mode activity
+    /// so each trip is fully finalised. Orphans with zero path points carry no
+    /// usable data and are deleted outright (writing a placeholder for them is
+    /// what created the bogus "0 m trip at (0,0)" timeline rows). Called once
+    /// per launch right after `ensureOpen`. Returns the number of orphans
+    /// handled; quiet when there are none.
+    @discardableResult
+    private func recoverOrphanedLiveTrips(writer: LiveTripWriter) async -> Int {
+        let recoveryLog = Logger(subsystem: "com.tibo.rememberme", category: "recovery")
+        let orphans: [LiveTripWriter.OrphanedPath]
+        do {
+            orphans = try writer.findOrphanedLivePaths()
+        } catch {
+            recoveryLog.error("findOrphanedLivePaths failed: \(error.localizedDescription, privacy: .public)")
+            return 0
+        }
+        guard !orphans.isEmpty else { return 0 }
+        recoveryLog.notice("found \(orphans.count, privacy: .public) orphaned live trip(s); finalising")
+
+        var handled = 0
+        for orphan in orphans {
+            do {
+                let endpoints = try writer.fetchTripEndpointsAndDistance(eventID: orphan.id)
+                if let (start, end, distance) = endpoints {
+                    try writer.writeActivity(
+                        eventID: UUID(),
+                        start: orphan.start,
+                        end: orphan.end,
+                        tzOffsetMinutes: orphan.startTZOffsetMinutes,
+                        startCoord: start,
+                        endCoord: end,
+                        distanceMeters: distance,
+                        mode: "unknown",
+                        probability: 0
+                    )
+                    recoveryLog.notice("recovered orphan id=\(orphan.id.uuidString, privacy: .public) dist=\(Int(distance), privacy: .public)m")
+                } else {
+                    // Path event with zero path_points — the trip opened but no
+                    // fix landed. There's nothing to show; drop the event.
+                    try writer.deleteEvents(ids: [orphan.id])
+                    recoveryLog.notice("deleted empty orphan id=\(orphan.id.uuidString, privacy: .public) (no fixes)")
+                }
+                handled += 1
+            } catch {
+                recoveryLog.error("failed to recover orphan id=\(orphan.id.uuidString, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            }
+        }
+        return handled
+    }
+
     /// Sets (or clears) the user-chosen label for a place. Empty/whitespace clears.
     /// Refreshes markers + timeline so the new name appears everywhere immediately.
-    public func setUserLabel(for marker: VisitMarker, label: String?) async {
+    func setUserLabel(for marker: VisitMarker, label: String?) async {
         guard let database else { return }
         do {
             try Persistence.setUserLabel(
@@ -680,7 +880,7 @@ public final class AppEnvironment {
     /// Updates an activity's transport mode without touching anything else (coordinates,
     /// distance, timestamps stay as recorded). Wired to the timeline's "Change mode"
     /// context menu — TripStyle picks the new icon + friendly label automatically.
-    public func setMode(for trip: TripSummary, to newMode: String) async {
+    func setMode(for trip: TripSummary, to newMode: String) async {
         guard let database else { return }
         do {
             try Persistence.updateActivityMode(in: database, eventID: trip.id, mode: newMode)
@@ -691,19 +891,11 @@ public final class AppEnvironment {
     }
 
     /// Triggers a one-off reverse-geocode for a place, refreshes markers when done.
-    public func resolveLabel(for marker: VisitMarker) async -> String? {
+    func resolveLabel(for marker: VisitMarker) async -> String? {
         let label = await geocoder?.resolveOnDemand(placeID: marker.placeID, coordinate: marker.coordinate)
         // Refresh markers so the cached label updates everywhere.
         await refresh()
         return label
-    }
-
-    /// Returns path-point coordinates for a trip's matching `path` event if one exists.
-    /// Falls back to the trip's start+end if no path is recorded.
-    public func polyline(for trip: TripSummary) -> [Coordinate] {
-        guard let database else { return [trip.startCoordinate, trip.endCoordinate] }
-        let points = (try? Persistence.fetchPathPoints(in: database, eventID: trip.id)) ?? []
-        return points.isEmpty ? [trip.startCoordinate, trip.endCoordinate] : points
     }
 
     /// Builds a map from every activity id to its multi-leg journey (if any), so the
@@ -730,48 +922,20 @@ public final class AppEnvironment {
         return byAnchor
     }
 
-    /// Path points for an event by ID. Returns an empty array when none are recorded.
-    /// Used by the refinement screen which doesn't have a `TripSummary` start/end fallback.
-    public func recordedPath(forEventID eventID: UUID) -> [Coordinate] {
-        guard let database else { return [] }
-        return (try? Persistence.fetchPathPoints(in: database, eventID: eventID)) ?? []
-    }
-
-    /// Recorded GPS samples for `trip`, sliced from the day's `path` events by time
-    /// overlap — same logic the main `TripRenderPlan` uses to draw the trip line on
-    /// the map. Activities and paths are separate events in this codebase; samples are
-    /// keyed by the *path* event's id, not the activity's, so the naive lookup in
-    /// `recordedPath(forEventID:)` returns empty for most trips.
-    ///
-    /// Aggregates samples from **every** path event overlapping the trip — Google's
-    /// Takeout chunks samples into 2-hour blocks, so a long drive spans multiple `path`
-    /// events. Picking only the first overlap dropped most of the samples for trips
-    /// longer than two hours.
-    public func recordedSamples(forTrip trip: TripSummary) -> [Coordinate] {
-        var collected: [(time: Date, coordinate: Coordinate)] = []
-        for path in dayPathTraces where overlap(path: path, trip: trip) > 0 {
-            for sample in path.samples {
-                let sampleTime = path.start.date.addingTimeInterval(TimeInterval(sample.offsetMinutes * 60))
-                if sampleTime >= trip.start.date && sampleTime <= trip.end.date {
-                    collected.append((sampleTime, sample.coordinate))
-                }
-            }
-        }
-        collected.sort { $0.time < $1.time }
-        return collected.map(\.coordinate)
-    }
-
-    private func overlap(path: PathTrace, trip: TripSummary) -> TimeInterval {
-        let latestStart = max(path.start.date, trip.start.date)
-        let earliestEnd = min(path.end.date, trip.end.date)
-        return max(0, earliestEnd.timeIntervalSince(latestStart))
+    /// Recorded GPS samples for `trip`, aggregated from the day's `path` events by time
+    /// overlap. Delegates to `TripRenderPlan.slicedSamples` — the same single source of truth
+    /// that draws the trip line on the map — so the refinement scoring and the rendered
+    /// polyline never drift apart.
+    func recordedSamples(forTrip trip: TripSummary) -> [Coordinate] {
+        TripRenderPlan.slicedSamples(for: trip, paths: dayPathTraces)
     }
 
     /// Mismatch threshold for the heal heuristic. When Google's recorded
     /// `startCoordinate` / `endCoordinate` is more than this far from the covering
     /// path event's first/last in-window sample, we treat Google's metadata as broken
-    /// and substitute the path samples.
-    private static let healMismatchThresholdMeters: Double = 1_500
+    /// and substitute the path samples. Single source of truth — also referenced by
+    /// `PathRefinementController` so the heal and the scoring-fallback stay in sync (L39).
+    static let healMismatchThresholdMeters: Double = 1_500
 
     /// True when `googleEnd` lies plausibly further along the path's direction of
     /// travel than `pathEnd`. Used to decide whether to keep Google's stored end
@@ -873,14 +1037,6 @@ public final class AppEnvironment {
         )
     }
 
-    /// Original GPS samples for a refined event (empty if the event has never been refined).
-    /// After a refinement, `recordedPath` returns the refined polyline and this returns the
-    /// pre-refinement samples — both are needed to show the before/after diff.
-    public func originalPath(forEventID eventID: UUID) -> [Coordinate] {
-        guard let database else { return [] }
-        return (try? Persistence.fetchOriginalPathPoints(in: database, eventID: eventID)) ?? []
-    }
-
     /// Internal escape hatch for in-process feature controllers that need to do their own
     /// DB writes (e.g. `PathRefinementController`). Returns nil if the DB isn't open yet.
     func openDatabase() -> SQLCipherDatabase? { database }
@@ -893,7 +1049,7 @@ public final class AppEnvironment {
     /// without manually steering the file picker.
     ///
     /// This entire method is omitted from Release builds.
-    public func autoImportSampleIfPresent() async {
+    func autoImportSampleIfPresent() async {
         guard counts.total == 0 else { return }
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
         guard let candidate = docs?.appendingPathComponent("location-history.json"),
@@ -914,11 +1070,17 @@ public final class AppEnvironment {
         let directory = appSupport.appendingPathComponent("RememberMe", isDirectory: true)
         try? fm.createDirectory(at: directory, withIntermediateDirectories: true)
         let file = directory.appendingPathComponent("db.sqlite")
-        try? fm.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: file.path)
+        // .completeUntilFirstUserAuthentication so background location callbacks can write
+        // after the user has unlocked the device at least once since boot. Required for the
+        // live tracker; existing users get migrated on first launch after this change.
+        try? fm.setAttributes(
+            [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+            ofItemAtPath: file.path
+        )
         return file.path
     }
 }
 
-public extension Persistence.EventCounts {
+extension Persistence.EventCounts {
     static let empty = Persistence.EventCounts(total: 0, activities: 0, visits: 0, paths: 0)
 }

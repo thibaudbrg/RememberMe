@@ -29,6 +29,13 @@ struct LocateMeButton: View {
 final class LocateMeManager: NSObject, CLLocationManagerDelegate {
     private let manager = CLLocationManager()
     public private(set) var lastKnown: CLLocationCoordinate2D?
+    /// Bumped on every fresh fix. `CLLocationCoordinate2D` isn't `Equatable`, so views observe
+    /// this counter instead of `lastKnown` to react to a new fix arriving.
+    public private(set) var fixCount = 0
+    /// True only between a user tap and the next fix (or authorization grant). Gates the
+    /// one-shot `requestLocation()` so the legacy authorization callback that fires on
+    /// creation never kicks off GPS without a tap.
+    private var pendingRequest = false
 
     override init() {
         super.init()
@@ -36,16 +43,18 @@ final class LocateMeManager: NSObject, CLLocationManagerDelegate {
         manager.desiredAccuracy = kCLLocationAccuracyBest
     }
 
-    /// Asks for authorization (if needed) and starts location updates. Returns the last-known
+    /// Asks for authorization (if needed) and fetches a single fix. Returns the last-known
     /// coordinate immediately if we already have one — the caller can re-center on it without
     /// waiting for a fresh fix.
     @discardableResult
     func requestAndStartIfNeeded() -> CLLocationCoordinate2D? {
         switch manager.authorizationStatus {
         case .notDetermined:
+            // Defer the request until the grant arrives in the authorization callback.
+            pendingRequest = true
             manager.requestWhenInUseAuthorization()
         case .authorizedWhenInUse, .authorizedAlways:
-            manager.startUpdatingLocation()
+            manager.requestLocation()
         case .denied, .restricted:
             break
         @unknown default:
@@ -57,17 +66,30 @@ final class LocateMeManager: NSObject, CLLocationManagerDelegate {
     // MARK: - CLLocationManagerDelegate
 
     nonisolated func locationManager(_ manager: CLLocationManager, didChangeAuthorization status: CLAuthorizationStatus) {
-        if status == .authorizedWhenInUse || status == .authorizedAlways {
-            Task { @MainActor in manager.startUpdatingLocation() }
+        Task { @MainActor in
+            // Only fetch if the user actually tapped Locate Me first (pendingRequest); the
+            // callback also fires on creation with existing authorization, which must not
+            // start GPS on its own.
+            guard self.pendingRequest else { return }
+            if status == .authorizedWhenInUse || status == .authorizedAlways {
+                manager.requestLocation()
+            } else {
+                self.pendingRequest = false
+            }
         }
     }
 
     nonisolated func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
         guard let coordinate = locations.last?.coordinate else { return }
-        Task { @MainActor in self.lastKnown = coordinate }
+        Task { @MainActor in
+            self.pendingRequest = false
+            self.lastKnown = coordinate
+            self.fixCount += 1
+        }
     }
 
     nonisolated func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
         // Soft-fail — user-initiated location requests don't need to surface errors prominently.
+        Task { @MainActor in self.pendingRequest = false }
     }
 }

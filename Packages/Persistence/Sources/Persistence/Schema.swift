@@ -3,7 +3,14 @@ import Foundation
 /// Versioned SQL schema. Bump `currentVersion` and add a new entry in `Migrations.steps`
 /// when the on-disk shape changes.
 public enum Schema {
-    public static let currentVersion: Int32 = 4
+    public static let currentVersion: Int32 = 5
+
+    /// v5 — Drop `idx_path_points_event`. It duplicates the `(event_id, seq)` PRIMARY KEY index on
+    /// `path_points`, so every lookup/ORDER BY on `event_id` is already served by the PK; the extra
+    /// index only added write amplification on the hottest insert path.
+    public static let v5: String = """
+    DROP INDEX idx_path_points_event;
+    """
 
     /// v4 — Journey refinement. When a refinement covers a multi-row journey
     /// (walk→bus→visit→train→walk→destination), we need to remember which originals

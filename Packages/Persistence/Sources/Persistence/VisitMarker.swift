@@ -54,6 +54,7 @@ public extension Persistence {
             FROM visits v
             JOIN events e ON e.id = v.event_id
             LEFT JOIN places p ON p.place_id = v.place_id
+            WHERE e.is_superseded = 0
             GROUP BY v.place_id
             ORDER BY most_recent DESC
             LIMIT ?;
@@ -62,7 +63,7 @@ public extension Persistence {
         try stmt.bind(1, int: limit)
 
         var markers: [VisitMarker] = []
-        while stmt.step() == .row {
+        while try stmt.step() == .row {
             guard let placeID = stmt.columnText(0) else { continue }
             markers.append(VisitMarker(
                 placeID: placeID,

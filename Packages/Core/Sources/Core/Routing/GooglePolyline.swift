@@ -31,7 +31,10 @@ public enum GooglePolyline {
         var shift = 0
         while true {
             guard index < encoded.endIndex else { return nil }
-            let ascii = Int(encoded[index].asciiValue ?? 0)
+            // Valid encoded-polyline characters are ASCII 63...126. Reject anything outside that
+            // range (non-ASCII bytes, control chars, '+'/space) instead of fabricating a delta.
+            guard let asciiValue = encoded[index].asciiValue, (63 ... 126).contains(asciiValue) else { return nil }
+            let ascii = Int(asciiValue)
             index = encoded.index(after: index)
             let chunk = (ascii - 63) & 0x1F
             result |= chunk << shift

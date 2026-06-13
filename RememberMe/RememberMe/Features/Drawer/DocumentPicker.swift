@@ -7,7 +7,7 @@ import UniformTypeIdentifiers
 struct DocumentPicker: UIViewControllerRepresentable {
     @Binding var isPresented: Bool
     let contentTypes: [UTType]
-    let onResult: (Result<URL, Error>) -> Void
+    let onPick: (URL) -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
@@ -35,7 +35,7 @@ struct DocumentPicker: UIViewControllerRepresentable {
         func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
             parent.isPresented = false
             if let url = urls.first {
-                parent.onResult(.success(url))
+                parent.onPick(url)
             }
         }
 

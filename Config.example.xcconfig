@@ -14,7 +14,10 @@ SWIFT_VERSION = 5.10
 
 // Feature flags (compile-time, opt-in by appending to ACTIVE_COMPILATION_CONDITIONS)
 //   DEBUG_PANEL       — internal overlays (dev builds only)
-//   VERBOSE_LOGGING   — log full coordinate precision (DEV ONLY, NEVER ship)
+//   VERBOSE_LOGGING   — log full coordinate and address precision. Without this flag
+//                       (the default in every build, Debug and Release), coordinates
+//                       and resolved place names are redacted in OSLog. Set it ONLY in
+//                       local dev builds; NEVER ship a build that defines it.
 SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited)
 
 // Strict App Transport Security — no exceptions.

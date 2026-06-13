@@ -1,0 +1,32 @@
+{
+  "originHash" : "7fe202cac44d79430f2257ddb309034936585d99339d58ca52e42ff363d82d5d",
+  "pins" : [
+    {
+      "identity" : "argon2swift",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/tmthecoder/Argon2Swift.git",
+      "state" : {
+        "revision" : "53543623fefe68461b7eeea03d7f96677c2fd76d"
+      }
+    },
+    {
+      "identity" : "phc-winner-argon2",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/P-H-C/phc-winner-argon2.git",
+      "state" : {
+        "branch" : "master",
+        "revision" : "f57e61e19229e23c4445b85494dbf7c07de721cb"
+      }
+    },
+    {
+      "identity" : "sqlcipher.swift",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/sqlcipher/sqlcipher.swift",
+      "state" : {
+        "revision" : "07bf6bc2191a063d6f1e7c3b5f276a3fadfe36b7",
+        "version" : "4.16.0"
+      }
+    }
+  ],
+  "version" : 3
+}

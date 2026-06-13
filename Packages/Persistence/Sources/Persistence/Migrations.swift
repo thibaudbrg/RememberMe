@@ -11,6 +11,7 @@ public enum Migrations {
         2: Schema.v2,
         3: Schema.v3,
         4: Schema.v4,
+        5: Schema.v5,
     ]
 
     /// Runs whatever upgrades are needed to bring `database` up to `Schema.currentVersion`.

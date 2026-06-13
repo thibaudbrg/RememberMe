@@ -31,7 +31,20 @@ public enum RouteSimilarity {
         let mean = total / Double(distances.count)
         let max = distances.max() ?? 0
         let p95 = percentile(distances, p: 0.95)
-        return SimilarityScore(meanMeters: mean, p95Meters: p95, maxMeters: max, sampleCount: distances.count)
+
+        // Candidate route length — used only as a tie-breaker (see SimilarityScore.composite).
+        var length = 0.0
+        for index in 1 ..< candidate.count {
+            length += PolylineDirection.haversineMeters(candidate[index - 1], candidate[index])
+        }
+
+        return SimilarityScore(
+            meanMeters: mean,
+            p95Meters: p95,
+            maxMeters: max,
+            sampleCount: distances.count,
+            candidateLengthMeters: length
+        )
     }
 
     /// Distance in meters from `point` to the nearest point on the line segment defined by
@@ -49,7 +62,12 @@ public enum RouteSimilarity {
         let mPerDegLon = 111_320.0 * cos(latRef)
 
         func project(_ c: Coordinate) -> (x: Double, y: Double) {
-            let x = (c.longitude - segmentStart.longitude) * mPerDegLon
+            // Normalize the longitude delta into [-180, 180] so a point and segment on opposite
+            // sides of the antimeridian (e.g. 179.99 vs -179.99) project a few km apart, not ~40,000 km.
+            var dLon = c.longitude - segmentStart.longitude
+            while dLon > 180 { dLon -= 360 }
+            while dLon < -180 { dLon += 360 }
+            let x = dLon * mPerDegLon
             let y = (c.latitude - segmentStart.latitude) * mPerDegLat
             return (x, y)
         }

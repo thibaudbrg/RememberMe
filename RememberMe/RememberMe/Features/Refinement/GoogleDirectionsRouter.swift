@@ -1,53 +1,76 @@
 import Core
 import Foundation
 
-/// HTTP client for Google Directions API. Returns `RouteCandidate`s in the same shape
-/// `MapKitRouter` does, so the rest of the refinement screen stays provider-agnostic.
-/// The API key is supplied per-call by the caller (read from `Settings`); we never
-/// store it in the build.
+/// HTTP client for RememberMe's route proxy (a Cloudflare Worker that forwards to the
+/// Google Directions API with a developer-held key, so no credential ever lives on
+/// devices). The response body is Google's Directions JSON — trimmed by the proxy to the
+/// fields parsed below — so the wire types in this file decode it unchanged.
+///
+/// Requests are authenticated with App Attest assertions (`AppAttestService`): the proxy
+/// serves only genuine builds of this app. It never receives any identity — see PRIVACY.md.
 @MainActor
-final class GoogleDirectionsRouter {
-    private static let endpoint = URL(string: "https://maps.googleapis.com/maps/api/directions/json")!
+final class RouteProxyRouter {
+    /// The proxy host. Neutral name, hardcoded — end users never see or configure it.
+    private static let workerBase = URL(string: "https://rm-route-proxy.thibaud-bourgeois25.workers.dev")!
+    private static var routeURL: URL { workerBase.appending(path: "v1/route") }
     private static let minDistanceMeters: Double = 100
     private static let maxDistanceMeters: Double = 1_000_000
     private static let endpointDecimals: Double = 10_000
 
     private let urlSession: URLSession
+    private let attest: AppAttestService
 
-    init(urlSession: URLSession = .shared) {
+    init(urlSession: URLSession = .shared, attest: AppAttestService? = nil) {
         self.urlSession = urlSession
+        self.attest = attest ?? AppAttestService(workerBase: Self.workerBase, urlSession: urlSession)
     }
 
-    /// Asks Google Directions for one or more routes between the rounded endpoints.
-    /// Throws `RoutingError.missingAPIKey` when `apiKey` is empty.
+    /// Asks the route proxy for one or more routes between the rounded endpoints.
     func fetchCandidates(
         start: Coordinate,
         end: Coordinate,
-        mode: RefinementMode,
-        apiKey: String
+        mode: RefinementMode
     ) async throws -> [RouteCandidate] {
-        guard !apiKey.trimmingCharacters(in: .whitespaces).isEmpty else {
-            throw RoutingError.missingAPIKey
-        }
-
         let straightLine = PolylineDirection.haversineMeters(start, end)
         guard straightLine >= Self.minDistanceMeters else { throw RoutingError.tooClose }
         guard straightLine <= Self.maxDistanceMeters else { throw RoutingError.tooFar }
 
-        let roundedStart = round(start)
-        let roundedEnd = round(end)
+        do {
+            return try await performFetch(start: start, end: end, mode: mode)
+        } catch RoutingError.attestationUnavailable {
+            // The server may have evicted our attested key (storage reset, rotation).
+            // Re-attest once with a fresh key before giving up.
+            attest.invalidate()
+            return try await performFetch(start: start, end: end, mode: mode)
+        }
+    }
 
-        var components = URLComponents(url: Self.endpoint, resolvingAgainstBaseURL: false)!
-        components.queryItems = [
-            URLQueryItem(name: "origin", value: "\(roundedStart.latitude),\(roundedStart.longitude)"),
-            URLQueryItem(name: "destination", value: "\(roundedEnd.latitude),\(roundedEnd.longitude)"),
-            URLQueryItem(name: "mode", value: googleMode(for: mode)),
-            URLQueryItem(name: "alternatives", value: "true"),
-            URLQueryItem(name: "key", value: apiKey),
+    private func performFetch(
+        start: Coordinate,
+        end: Coordinate,
+        mode: RefinementMode
+    ) async throws -> [RouteCandidate] {
+        // Fixed 4-decimal formatting (~11 m precision): privacy rounding, and the proxy
+        // validates coordinates against a ≤6-decimal pattern.
+        let body: [String: Any] = [
+            "origin": String(format: "%.4f,%.4f", round(start).latitude, round(start).longitude),
+            "destination": String(format: "%.4f,%.4f", round(end).latitude, round(end).longitude),
+            "mode": googleMode(for: mode),
+            "alternatives": true,
         ]
-        guard let url = components.url else { throw RoutingError.other("Bad URL") }
+        let bodyData = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
 
-        let request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 20)
+        var request = URLRequest(
+            url: Self.routeURL,
+            cachePolicy: .reloadIgnoringLocalCacheData,
+            timeoutInterval: 20
+        )
+        request.httpMethod = "POST"
+        request.httpBody = bodyData
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        for (header, value) in try await attest.authHeaders(for: bodyData) {
+            request.setValue(value, forHTTPHeaderField: header)
+        }
 
         let data: Data
         let response: URLResponse
@@ -60,8 +83,17 @@ final class GoogleDirectionsRouter {
         }
 
         guard let http = response as? HTTPURLResponse else { throw RoutingError.network }
-        if http.statusCode < 200 || http.statusCode >= 300 {
-            throw RoutingError.other("Google Directions HTTP \(http.statusCode)")
+        switch http.statusCode {
+        case 200 ..< 300:
+            break
+        case 401, 403:
+            throw RoutingError.attestationUnavailable
+        case 429:
+            throw RoutingError.throttledGoogle
+        case 500 ..< 600:
+            throw RoutingError.network
+        default:
+            throw RoutingError.other("Route proxy HTTP \(http.statusCode)")
         }
 
         let decoded: GoogleDirectionsResponse
@@ -79,7 +111,7 @@ final class GoogleDirectionsRouter {
         case "REQUEST_DENIED", "INVALID_REQUEST":
             throw RoutingError.other(decoded.errorMessage ?? "Google rejected the request (\(decoded.status)).")
         case "OVER_QUERY_LIMIT", "OVER_DAILY_LIMIT":
-            throw RoutingError.other("Google API quota exceeded.")
+            throw RoutingError.throttledGoogle
         default:
             throw RoutingError.other(decoded.errorMessage ?? "Google: \(decoded.status)")
         }

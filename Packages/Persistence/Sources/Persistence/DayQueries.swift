@@ -80,19 +80,20 @@ public extension Persistence {
             FROM visits v
             JOIN events e ON e.id = v.event_id
             LEFT JOIN places p ON p.place_id = v.place_id
-            WHERE e.start_ts >= ? AND e.start_ts < ?
+            WHERE e.start_ts < ? AND (e.end_ts > ? OR e.start_ts >= ?)
               AND e.is_superseded = 0
             GROUP BY v.place_id
             ORDER BY most_recent DESC
             LIMIT ?;
         """)
         defer { stmt.finalize() }
-        try stmt.bind(1, int64: start)
-        try stmt.bind(2, int64: end)
-        try stmt.bind(3, int: limit)
+        try stmt.bind(1, int64: end)
+        try stmt.bind(2, int64: start)
+        try stmt.bind(3, int64: start)
+        try stmt.bind(4, int: limit)
 
         var markers: [VisitMarker] = []
-        while stmt.step() == .row {
+        while try stmt.step() == .row {
             guard let placeID = stmt.columnText(0) else { continue }
             markers.append(VisitMarker(
                 placeID: placeID,
@@ -118,18 +119,19 @@ public extension Persistence {
                 a.start_lat, a.start_lon, a.end_lat, a.end_lon, a.distance_m, a.mode
             FROM activities a
             JOIN events e ON e.id = a.event_id
-            WHERE e.start_ts >= ? AND e.start_ts < ?
+            WHERE e.start_ts < ? AND (e.end_ts > ? OR e.start_ts >= ?)
               AND e.is_superseded = 0
             ORDER BY e.start_ts DESC
             LIMIT ?;
         """)
         defer { stmt.finalize() }
-        try stmt.bind(1, int64: start)
-        try stmt.bind(2, int64: end)
-        try stmt.bind(3, int: limit)
+        try stmt.bind(1, int64: end)
+        try stmt.bind(2, int64: start)
+        try stmt.bind(3, int64: start)
+        try stmt.bind(4, int: limit)
 
         var trips: [TripSummary] = []
-        while stmt.step() == .row {
+        while try stmt.step() == .row {
             guard let idString = stmt.columnText(0),
                   let id = UUID(uuidString: idString) else { continue }
             trips.append(TripSummary(
@@ -170,18 +172,19 @@ public extension Persistence {
             LEFT JOIN activities a ON a.event_id = e.id
             LEFT JOIN visits     v ON v.event_id = e.id
             LEFT JOIN places     p ON p.place_id = v.place_id
-            WHERE e.start_ts >= ? AND e.start_ts < ?
+            WHERE e.start_ts < ? AND (e.end_ts > ? OR e.start_ts >= ?)
               AND e.is_superseded = 0
             ORDER BY e.start_ts ASC
             LIMIT ?;
         """)
         defer { stmt.finalize() }
-        try stmt.bind(1, int64: start)
-        try stmt.bind(2, int64: end)
-        try stmt.bind(3, int: limit)
+        try stmt.bind(1, int64: end)
+        try stmt.bind(2, int64: start)
+        try stmt.bind(3, int64: start)
+        try stmt.bind(4, int: limit)
 
         var entries: [TimelineEntry] = []
-        while stmt.step() == .row {
+        while try stmt.step() == .row {
             guard let idString = stmt.columnText(0),
                   let id = UUID(uuidString: idString),
                   let kind = stmt.columnText(1) else { continue }
@@ -232,22 +235,23 @@ public extension Persistence {
             SELECT id, start_ts, start_tz_offset_min, end_ts, end_tz_offset_min
             FROM events
             WHERE kind = 'path'
-              AND start_ts >= ? AND start_ts < ?
+              AND start_ts < ? AND (end_ts > ? OR start_ts >= ?)
               AND is_superseded = 0
             ORDER BY start_ts ASC
             LIMIT ?;
         """)
         defer { pathEventsStmt.finalize() }
-        try pathEventsStmt.bind(1, int64: start)
-        try pathEventsStmt.bind(2, int64: end)
-        try pathEventsStmt.bind(3, int: limit)
+        try pathEventsStmt.bind(1, int64: end)
+        try pathEventsStmt.bind(2, int64: start)
+        try pathEventsStmt.bind(3, int64: start)
+        try pathEventsStmt.bind(4, int: limit)
 
         struct Header { let id: UUID
             let start: TimestampedLocal
             let end: TimestampedLocal
         }
         var headers: [Header] = []
-        while pathEventsStmt.step() == .row {
+        while try pathEventsStmt.step() == .row {
             guard let idString = pathEventsStmt.columnText(0),
                   let id = UUID(uuidString: idString) else { continue }
             headers.append(Header(
@@ -264,10 +268,16 @@ public extension Persistence {
         }
         guard !headers.isEmpty else { return [] }
 
+        // Decimate at query time for multi-day ranges so a month view doesn't decode 10^5+
+        // points. Single-day (and 2-day) ranges stay exact; wider ranges keep every `stride`th
+        // sample (seq % stride == 0), which always keeps seq 0 so each trace still starts at its
+        // real origin. The map can't show per-metre detail at month zoom anyway.
+        let stride = decimationStride(forSpanSeconds: end - start)
+
         // One reusable prepared statement to fetch samples (coord + offset_min) per event.
         let pointsStmt = try database.prepare("""
             SELECT lat, lon, offset_min FROM path_points
-            WHERE event_id = ?
+            WHERE event_id = ? AND (? = 1 OR seq % ? = 0)
             ORDER BY seq ASC;
         """)
         defer { pointsStmt.finalize() }
@@ -277,9 +287,11 @@ public extension Persistence {
             try pointsStmt.reset()
             try pointsStmt.clearBindings()
             try pointsStmt.bind(1, text: header.id.uuidString)
+            try pointsStmt.bind(2, int: stride)
+            try pointsStmt.bind(3, int: stride)
 
             var samples: [PathPoint] = []
-            while pointsStmt.step() == .row {
+            while try pointsStmt.step() == .row {
                 samples.append(PathPoint(
                     coordinate: Coordinate(
                         latitude: pointsStmt.columnDouble(0),
@@ -302,13 +314,14 @@ public extension Persistence {
         let visitStmt = try database.prepare("""
             SELECT count(*) FROM visits v
             JOIN events e ON e.id = v.event_id
-            WHERE e.start_ts >= ? AND e.start_ts < ?
+            WHERE e.start_ts < ? AND (e.end_ts > ? OR e.start_ts >= ?)
               AND e.is_superseded = 0;
         """)
         defer { visitStmt.finalize() }
-        try visitStmt.bind(1, int64: start)
-        try visitStmt.bind(2, int64: end)
-        let visitCount: Int = visitStmt.step() == .row ? visitStmt.columnInt(0) : 0
+        try visitStmt.bind(1, int64: end)
+        try visitStmt.bind(2, int64: start)
+        try visitStmt.bind(3, int64: start)
+        let visitCount: Int = try visitStmt.step() == .row ? visitStmt.columnInt(0) : 0
 
         // Activity breakdown by mode.
         let activityStmt = try database.prepare("""
@@ -319,17 +332,18 @@ public extension Persistence {
                 COUNT(*) AS count
             FROM activities a
             JOIN events e ON e.id = a.event_id
-            WHERE e.start_ts >= ? AND e.start_ts < ?
+            WHERE e.start_ts < ? AND (e.end_ts > ? OR e.start_ts >= ?)
               AND e.is_superseded = 0
             GROUP BY a.mode
             ORDER BY total_distance DESC;
         """)
         defer { activityStmt.finalize() }
-        try activityStmt.bind(1, int64: start)
-        try activityStmt.bind(2, int64: end)
+        try activityStmt.bind(1, int64: end)
+        try activityStmt.bind(2, int64: start)
+        try activityStmt.bind(3, int64: start)
 
         var modes: [ActivityModeSummary] = []
-        while activityStmt.step() == .row {
+        while try activityStmt.step() == .row {
             let mode = activityStmt.columnText(0) ?? ""
             modes.append(ActivityModeSummary(
                 mode: mode,
@@ -357,7 +371,7 @@ public extension Persistence {
         formatter.timeZone = TimeZone.current
 
         var days: [Date] = []
-        while stmt.step() == .row {
+        while try stmt.step() == .row {
             guard let dateString = stmt.columnText(0) else { continue }
             // SQLite returns "YYYY-MM-DD"; we interpret it at local midnight.
             if let parsed = parseLocalMidnight(dateString) {
@@ -374,6 +388,17 @@ public extension Persistence {
             Int64(dayRange.lowerBound.timeIntervalSince1970),
             Int64(dayRange.upperBound.timeIntervalSince1970)
         )
+    }
+
+    /// Stride for `fetchPathTraces` query-time decimation. `1` means keep every sample (no
+    /// decimation). Anything up to ~2 days stays exact; week views keep 1-in-4, month views
+    /// 1-in-12 — enough to bound a month-view fetch to O(10^3) points instead of O(10^5).
+    private static func decimationStride(forSpanSeconds span: Int64) -> Int {
+        let twoDays: Int64 = 2 * 86_400
+        let eightDays: Int64 = 8 * 86_400
+        if span <= twoDays { return 1 }
+        if span <= eightDays { return 4 }
+        return 12
     }
 
     private static func parseLocalMidnight(_ yyyymmdd: String) -> Date? {

@@ -47,6 +47,17 @@ final class PolylineDirectionTests: XCTestCase {
         XCTAssertEqual(distance, 111_195, accuracy: 200) // ±200 m tolerance
     }
 
+    func testHaversineAntipodalIsFiniteNotNaN() {
+        // Near-antipodal points push the haversine term a few ulps above 1; without the clamp
+        // sqrt(1 - central) is NaN. The result must be finite and ~half the Earth's circumference.
+        let distance = PolylineDirection.haversineMeters(
+            Coordinate(latitude: 0, longitude: 0),
+            Coordinate(latitude: 0, longitude: 180)
+        )
+        XCTAssertTrue(distance.isFinite, "antipodal distance must not be NaN")
+        XCTAssertEqual(distance, .pi * PolylineDirection.earthRadiusMeters, accuracy: 1.0)
+    }
+
     // MARK: - Markers
 
     func testReturnsNoMarkersForShortLine() {
@@ -69,6 +80,17 @@ final class PolylineDirectionTests: XCTestCase {
         // All bearings should be ~90° (due east).
         for marker in markers {
             XCTAssertEqual(marker.bearingDegrees, 90, accuracy: 1.0)
+        }
+        // The line runs straight east at a constant latitude, so the interpolated markers must
+        // march strictly eastward (longitude strictly increasing) and stay on the latitude.
+        let longitudes = markers.map(\.coordinate.longitude)
+        for (earlier, later) in zip(longitudes, longitudes.dropFirst()) {
+            XCTAssertLessThan(earlier, later, "markers must be ordered by increasing distance from start")
+        }
+        XCTAssertGreaterThan(longitudes.first ?? 0, 6.0, "first marker is past the start")
+        XCTAssertLessThan(longitudes.last ?? 0, 6.05, "last marker is before the end")
+        for marker in markers {
+            XCTAssertEqual(marker.coordinate.latitude, 47.0, accuracy: 1e-9)
         }
     }
 

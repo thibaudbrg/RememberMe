@@ -6,9 +6,10 @@ import SwiftUI
 /// Tapping a row sets the map's focused item (visit → coordinate, trip → polyline).
 struct TimelineDrawerContent: View {
     @Environment(AppEnvironment.self) private var environment
-    @Environment(Settings.self) private var settings
+    @Environment(PremiumStore.self) private var premium
     @State private var refinementContext: RefinementSheetContext?
     @State private var refineDayRunning = false
+    @State private var showingPaywall = false
 
     /// Identifiable wrapper so `.sheet(item:)` can drive presentation. Carries both the
     /// trip and the optional journey context — single-trip refinement passes nil, journey
@@ -61,13 +62,20 @@ struct TimelineDrawerContent: View {
 
                 if showRefineRangeButton {
                     RefineDayButton(label: refineRangeButtonLabel) {
-                        refineDayRunning = true
+                        if premium.isPremium {
+                            refineDayRunning = true
+                        } else {
+                            showingPaywall = true
+                        }
                     }
                     .padding(.horizontal, 20)
                     .padding(.top, 12)
                 }
             }
             .padding(.bottom, 32)
+        }
+        .sheet(isPresented: $showingPaywall) {
+            PaywallSheet(contextLine: "Route refinement is a Premium feature.")
         }
         .sheet(isPresented: $refineDayRunning) {
             RefineHistoryProgressSheet(
@@ -81,6 +89,9 @@ struct TimelineDrawerContent: View {
             // why we don't put this in the detail view's onDisappear, which fires on push
             // and would clobber the navigation binding mid-flight).
             environment.pathRefinement.state = .idle
+            // Drop the active fetch identity too, so a late in-flight fetch for the
+            // just-closed trip can't push its candidates into a subsequently-opened trip (M14).
+            environment.pathRefinement.activeTripID = nil
         }) { context in
             NavigationStack {
                 PathRefinementTripDetailView(trip: context.trip, journey: context.journey)
@@ -97,16 +108,20 @@ struct TimelineDrawerContent: View {
     }
 
     private func handleRefineTap(_ entry: TimelineEntry, journey: Journey?) {
-        guard settings.alphaModeEnabled, let trip = tripSummary(for: entry) else { return }
+        guard let trip = tripSummary(for: entry) else { return }
+        guard premium.isPremium else {
+            showingPaywall = true
+            return
+        }
         refinementContext = RefinementSheetContext(trip: trip, journey: journey)
     }
 
-    /// True when Alpha is on AND at least one trip in the active range still needs refining
-    /// and has a routable mode. Used to gate the "Refine whole day / week / month" button.
+    /// True when at least one trip in the active range still needs refining and has a
+    /// routable mode. Used to gate the "Refine whole day / week / month" button. The button
+    /// stays visible for free users — tapping it presents the paywall instead of the runner.
     /// `dayTrips` already spans `environment.dayRange`, so the same check works for all
     /// three range kinds — no extra per-day fetch needed.
     private var showRefineRangeButton: Bool {
-        guard settings.alphaModeEnabled else { return false }
         return environment.dayTrips.contains { trip in
             !environment.dayRefinedActivityIDs.contains(trip.id)
                 && RefinementMode.map(recordedMode: trip.mode) != nil
@@ -284,7 +299,6 @@ private struct SummaryChip: View {
 // MARK: - Event list
 
 private struct EventList: View {
-    @Environment(Settings.self) private var settings
     @Environment(AppEnvironment.self) private var environment
     let entries: [TimelineEntry]
     let onTap: (TimelineEntry) -> Void
@@ -298,31 +312,31 @@ private struct EventList: View {
                     .onTapGesture { onTap(entry) }
                     .contextMenu {
                         if entry.kind == "activity" {
-                            // Mode change — available regardless of alpha mode; doesn't
-                            // touch coords / distance / timestamps, just relabels the trip.
+                            // Mode change — free for everyone; doesn't touch
+                            // coords / distance / timestamps, just relabels the trip.
                             ChangeModeMenu(entry: entry)
 
-                            if settings.alphaModeEnabled {
-                                // Precomputed lookup — runs in O(1). Same Journey instance for
-                                // every member leg, so A, B, and C all see identical menu items.
-                                let journey = environment.dayJourneysByAnchor[entry.id]
+                            // Refinement items stay visible for free users — the tap
+                            // handler presents the paywall when Premium isn't owned.
+                            // Precomputed lookup — runs in O(1). Same Journey instance for
+                            // every member leg, so A, B, and C all see identical menu items.
+                            let journey = environment.dayJourneysByAnchor[entry.id]
+                            Button {
+                                onRefine(entry, nil)
+                            } label: {
+                                Label(
+                                    "Refine this trip only",
+                                    systemImage: "point.topleft.down.curvedto.point.bottomright.up"
+                                )
+                            }
+                            if let journey, journey.isMultiLeg {
                                 Button {
-                                    onRefine(entry, nil)
+                                    onRefine(entry, journey)
                                 } label: {
                                     Label(
-                                        "Refine this trip only",
-                                        systemImage: "point.topleft.down.curvedto.point.bottomright.up"
+                                        "Refine whole journey — \(journey.legCount) legs",
+                                        systemImage: "arrow.triangle.branch"
                                     )
-                                }
-                                if let journey, journey.isMultiLeg {
-                                    Button {
-                                        onRefine(entry, journey)
-                                    } label: {
-                                        Label(
-                                            "Refine whole journey — \(journey.legCount) legs",
-                                            systemImage: "arrow.triangle.branch"
-                                        )
-                                    }
                                 }
                             }
                         }
@@ -425,16 +439,19 @@ private struct EventTimelineRow: View {
                     Text(title)
                         .font(.callout.weight(.medium))
                         .lineLimit(2)
-                    // Tiny grey indicator if a photo was taken near this event.
-                    if environment.hasNearbyPhoto(for: entry) {
+                    // Tiny grey indicator if a photo was taken near this event. Uses the
+                    // precomputed set (O(1) lookup) instead of re-scanning all photos per row.
+                    if environment.entryIDsWithNearbyPhotos.contains(entry.id) {
                         Image(systemName: "photo")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
                 }
-                Text(subtitle)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                if let subtitle {
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             Spacer()
@@ -469,14 +486,17 @@ private struct EventTimelineRow: View {
         }
     }
 
-    private var subtitle: String {
+    private var subtitle: String? {
         switch entry.detail {
         case let .visit(_, _, _, semanticType, _):
-            semanticType
+            // Hide when Google Takeout didn't classify the visit (most of them).
+            // Keep it for the handful of tagged ones: Home, Work, Search.
+            if semanticType.isEmpty || semanticType == "Unknown" { return nil }
+            return semanticTypeLabel(semanticType)
         case .activity:
-            "Trip"
+            return "Trip"
         case .path:
-            "Background trace"
+            return "Background trace"
         }
     }
 

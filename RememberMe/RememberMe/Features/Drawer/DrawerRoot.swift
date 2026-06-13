@@ -5,9 +5,12 @@ import UniformTypeIdentifiers
 /// the Overview panel (counts + import) and the Timeline panel (chronological list).
 struct DrawerRoot: View {
     @Environment(AppEnvironment.self) private var environment
+    @Environment(PremiumStore.self) private var premium
     @State private var showingSettings = false
     @State private var showingImporter = false
     @State private var importError: String?
+    @State private var postImportSkippedOlder = 0
+    @State private var showingPostImportPaywall = false
 
     var body: some View {
         @Bindable var env = environment
@@ -17,6 +20,7 @@ struct DrawerRoot: View {
                 EmptyDataView(
                     status: environment.importStatus,
                     error: importError,
+                    showsFreeTierNote: !premium.isPremium,
                     onImport: {
                         importError = nil
                         showingImporter = true
@@ -46,6 +50,8 @@ struct DrawerRoot: View {
                             Text("Insights").tag(AppEnvironment.DrawerTab.insights)
                         }
                         .pickerStyle(.segmented)
+                        .padding(4)
+                        .liquidGlassPanel(in: Capsule())
                     }
                     .padding(.horizontal, 20)
                     .padding(.top, 28)
@@ -66,15 +72,22 @@ struct DrawerRoot: View {
             SettingsSheet()
         }
         .background(
-            DocumentPicker(isPresented: $showingImporter, contentTypes: [.json]) { result in
-                switch result {
-                case let .success(url):
-                    Task { await environment.importTakeout(from: url) }
-                case let .failure(error):
-                    importError = error.localizedDescription
+            DocumentPicker(isPresented: $showingImporter, contentTypes: [.json]) { url in
+                Task {
+                    await environment.importTakeout(from: url, cutoff: premium.importCutoff)
+                    if case let .completed(_, _, skippedOlder) = environment.importStatus,
+                       skippedOlder > 0 {
+                        postImportSkippedOlder = skippedOlder
+                        showingPostImportPaywall = true
+                    }
                 }
             }
         )
+        .sheet(isPresented: $showingPostImportPaywall) {
+            PaywallSheet(
+                contextLine: "Imported the last 14 days. \(postImportSkippedOlder) older records were skipped — unlock Premium, then import the same file again to fill in the rest."
+            )
+        }
     }
 }
 
@@ -84,6 +97,7 @@ private struct EmptyDataView: View {
     @Environment(AppEnvironment.self) private var environment
     let status: AppEnvironment.ImportStatus
     let error: String?
+    let showsFreeTierNote: Bool
     let onImport: () -> Void
     let onOpenSettings: () -> Void
 
@@ -165,6 +179,13 @@ private struct EmptyDataView: View {
                     systemImage: "square.and.arrow.down",
                     action: onImport
                 )
+                if showsFreeTierNote {
+                    Text("Free imports the last 14 days — Premium unlocks your full history.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 32)
+                }
                 Button(action: onOpenSettings) {
                     Text("Or open Settings")
                         .font(.footnote)

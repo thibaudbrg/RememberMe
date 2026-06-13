@@ -95,7 +95,7 @@ public extension Persistence {
         """)
         defer { stmt.finalize() }
         try stmt.bind(1, text: placeID)
-        guard stmt.step() == .row else { return nil }
+        guard try stmt.step() == .row else { return nil }
 
         let userLabel = stmt.columnText(0)
         let resolvedLabel = stmt.columnText(1)
@@ -201,7 +201,7 @@ public extension Persistence {
                 v.semantic_type, v.probability
             FROM visits v
             JOIN events e ON e.id = v.event_id
-            WHERE v.place_id = ?
+            WHERE v.place_id = ? AND e.is_superseded = 0
             ORDER BY e.start_ts DESC
             LIMIT ?;
         """)
@@ -210,7 +210,7 @@ public extension Persistence {
         try stmt.bind(2, int: limit)
 
         var items: [VisitHistoryItem] = []
-        while stmt.step() == .row {
+        while try stmt.step() == .row {
             guard let idString = stmt.columnText(0),
                   let id = UUID(uuidString: idString) else { continue }
             let start = TimestampedLocal(
@@ -244,6 +244,7 @@ public extension Persistence {
                 a.distance_m, a.mode
             FROM activities a
             JOIN events e ON e.id = a.event_id
+            WHERE e.is_superseded = 0
             ORDER BY e.start_ts DESC
             LIMIT ?;
         """)
@@ -251,7 +252,7 @@ public extension Persistence {
         try stmt.bind(1, int: limit)
 
         var trips: [TripSummary] = []
-        while stmt.step() == .row {
+        while try stmt.step() == .row {
             guard let idString = stmt.columnText(0),
                   let id = UUID(uuidString: idString) else { continue }
             trips.append(TripSummary(
@@ -285,7 +286,7 @@ public extension Persistence {
         try stmt.bind(1, text: eventID.uuidString)
 
         var points: [Coordinate] = []
-        while stmt.step() == .row {
+        while try stmt.step() == .row {
             points.append(Coordinate(latitude: stmt.columnDouble(0), longitude: stmt.columnDouble(1)))
         }
         return points
@@ -309,6 +310,7 @@ public extension Persistence {
             LEFT JOIN activities a ON a.event_id = e.id
             LEFT JOIN visits     v ON v.event_id = e.id
             LEFT JOIN places     p ON p.place_id = v.place_id
+            WHERE e.is_superseded = 0
             ORDER BY e.start_ts DESC
             LIMIT ?;
         """)
@@ -316,7 +318,7 @@ public extension Persistence {
         try stmt.bind(1, int: limit)
 
         var entries: [TimelineEntry] = []
-        while stmt.step() == .row {
+        while try stmt.step() == .row {
             guard let idString = stmt.columnText(0),
                   let id = UUID(uuidString: idString),
                   let kind = stmt.columnText(1) else { continue }
@@ -355,6 +357,32 @@ public extension Persistence {
         return entries
     }
 
+    /// Snapshot of geocoding progress. `total` is the count of distinct
+    /// `place_id`s across all visit rows; `resolved` is the count that already
+    /// have a non-null `resolved_label` in the `places` table. Used by the
+    /// Settings UI to display a "how far along is the geocoder" percentage.
+    /// Once a place is resolved its row stays in `places` forever — the
+    /// geocoder skips it on future runs because `fetchUnresolvedPlaceIDs`
+    /// excludes anything with a non-null `resolved_label`.
+    static func fetchPlaceResolutionProgress(in database: SQLCipherDatabase) throws -> (total: Int, resolved: Int) {
+        let totalStmt = try database.prepare("SELECT COUNT(DISTINCT place_id) FROM visits;")
+        defer { totalStmt.finalize() }
+        var total: Int32 = 0
+        if try totalStmt.step() == .row { total = totalStmt.columnInt32(0) }
+
+        let resolvedStmt = try database.prepare("""
+            SELECT COUNT(DISTINCT v.place_id)
+            FROM visits v
+            INNER JOIN places p ON p.place_id = v.place_id
+            WHERE p.resolved_label IS NOT NULL;
+        """)
+        defer { resolvedStmt.finalize() }
+        var resolved: Int32 = 0
+        if try resolvedStmt.step() == .row { resolved = resolvedStmt.columnInt32(0) }
+
+        return (total: Int(total), resolved: Int(resolved))
+    }
+
     /// Place IDs that don't yet have a resolved label. Used by the geocoding service to drive its queue.
     static func fetchUnresolvedPlaceIDs(in database: SQLCipherDatabase, limit: Int = 500) throws -> [String] {
         let stmt = try database.prepare("""
@@ -368,7 +396,7 @@ public extension Persistence {
         try stmt.bind(1, int: limit)
 
         var ids: [String] = []
-        while stmt.step() == .row {
+        while try stmt.step() == .row {
             if let id = stmt.columnText(0) { ids.append(id) }
         }
         return ids
@@ -393,7 +421,7 @@ public extension Persistence {
             try stmt.bind(Int32(index + 1), text: id)
         }
         var result: [String: Coordinate] = [:]
-        while stmt.step() == .row {
+        while try stmt.step() == .row {
             guard let id = stmt.columnText(0) else { continue }
             result[id] = Coordinate(latitude: stmt.columnDouble(1), longitude: stmt.columnDouble(2))
         }

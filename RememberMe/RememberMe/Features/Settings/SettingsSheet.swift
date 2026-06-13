@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 struct SettingsSheet: View {
     @Environment(Settings.self) private var settings
     @Environment(AppEnvironment.self) private var environment
+    @Environment(PremiumStore.self) private var premium
     @Environment(\.dismiss) private var dismiss
     @State private var showingFileImporter = false
     @State private var lastImportError: String?
@@ -19,10 +20,12 @@ struct SettingsSheet: View {
     @State private var importPassphrase = ""
     @State private var showingImportPassphrase = false
 
-    @State private var showingAlphaConfirmation = false
-    @State private var showingGoogleConfirmation = false
+    @State private var showingPaywall = false
+    @State private var postImportSkippedOlder = 0
     @State private var showingRefineHistoryConfirm = false
     @State private var showingRefineHistoryRun = false
+    @State private var showingTrackingOnboarding = false
+    @State private var showingTrackingLog = false
 
     var body: some View {
         @Bindable var settings = settings
@@ -45,8 +48,12 @@ struct SettingsSheet: View {
                     Toggle(isOn: $settings.showPhotosOnMap) {
                         Label("Photos on map", systemImage: "photo.on.rectangle.angled")
                     }
-                    .onChange(of: settings.showPhotosOnMap) { _, isOn in
-                        Task { await environment.loadDayPhotos(enabled: isOn) }
+                    if environment.photoLibrary.authorization == .limited {
+                        Button {
+                            environment.photoLibrary.presentLimitedLibraryPicker()
+                        } label: {
+                            Label("Manage selected photos", systemImage: "photo.badge.plus")
+                        }
                     }
                 }
 
@@ -88,6 +95,11 @@ struct SettingsSheet: View {
                     Text("Data")
                 }
 
+                LiveTrackingSection(
+                    showingOnboarding: $showingTrackingOnboarding,
+                    showingLog: $showingTrackingLog
+                )
+
                 Section {
                     encryptedExportRow
                     encryptedImportRow
@@ -99,59 +111,37 @@ struct SettingsSheet: View {
                 }
 
                 Section {
-                    Toggle(isOn: $settings.alphaModeEnabled) {
-                        Label("Alpha features", systemImage: "flask")
-                    }
-                    .onChange(of: settings.alphaModeEnabled) { _, isOn in
-                        if isOn, !settings.alphaModeAcknowledged {
-                            showingAlphaConfirmation = true
-                        }
-                    }
-                    if settings.alphaModeEnabled {
-                        Picker("Routing provider", selection: $settings.refinementProvider) {
-                            ForEach(RefinementProvider.allCases) { provider in
-                                Text(provider.label).tag(provider)
-                            }
-                        }
-                        .pickerStyle(.segmented)
-                        .onChange(of: settings.refinementProvider) { _, newValue in
-                            if newValue == .google, !settings.googleRoutingAcknowledged {
-                                showingGoogleConfirmation = true
-                            }
-                        }
+                    Label("Long-press a trip in the timeline to refine it.", systemImage: "hand.tap")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
 
-                        switch settings.refinementProvider {
-                        case .apple:
-                            Label("Transit isn't supported — bus / train / subway trips will be skipped.", systemImage: "info.circle")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        case .google:
-                            SecureField("Google Directions API key", text: $settings.googleDirectionsAPIKey)
-                                .textContentType(.password)
-                                .autocorrectionDisabled()
-                                .textInputAutocapitalization(.never)
-                            if settings.googleDirectionsAPIKey.isEmpty {
-                                Label("Paste your key from Google Cloud Console.", systemImage: "exclamationmark.triangle")
-                                    .font(.caption)
-                                    .foregroundStyle(.orange)
-                            }
-                        }
-
-                        Label("Long-press a trip in the timeline to refine it.", systemImage: "hand.tap")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-
-                        Button(role: .destructive) {
+                    Button(role: .destructive) {
+                        if premium.isPremium {
                             showingRefineHistoryConfirm = true
-                        } label: {
-                            Label("Refine entire history", systemImage: "wand.and.stars")
+                        } else {
+                            showingPaywall = true
                         }
+                    } label: {
+                        Label("Refine entire history", systemImage: "wand.and.stars")
                     }
                 } header: {
-                    Text("Alpha features")
+                    Text("Refine routes")
                 } footer: {
-                    Text(alphaFooterText)
+                    Text("Snaps noisy GPS traces to real roads, rails and paths. Only a trip's start and end (rounded to ~11 m) leave your device — sent to RememberMe's routing service, then Google. No identity, no full track. Premium feature.")
                 }
+
+                #if DEBUG
+                Section {
+                    Toggle("Force Premium", isOn: Binding(
+                        get: { premium.debugForcePremium },
+                        set: { premium.debugForcePremium = $0 }
+                    ))
+                } header: {
+                    Text("Debug")
+                } footer: {
+                    Text("DEBUG builds only — unlocks Premium features without a purchase so the routing proxy / App Attest path can be tested. Compiled out of release builds.")
+                }
+                #endif
             }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
@@ -161,16 +151,16 @@ struct SettingsSheet: View {
                 }
             }
             .background(
-                DocumentPicker(isPresented: $showingFileImporter, contentTypes: [.json]) { result in
-                    handleFilePick(result)
+                DocumentPicker(isPresented: $showingFileImporter, contentTypes: [.json]) { url in
+                    handleFilePick(url)
                 }
             )
             .background(
                 DocumentPicker(
                     isPresented: $showingEncryptedImporter,
                     contentTypes: [UTType(filenameExtension: "rmex") ?? .data, .data]
-                ) { result in
-                    handleEncryptedFilePick(result)
+                ) { url in
+                    handleEncryptedFilePick(url)
                 }
             )
             .alert("Choose a passphrase", isPresented: $showingExportPassphrase) {
@@ -183,9 +173,9 @@ struct SettingsSheet: View {
                 Button("Export") {
                     runExport()
                 }
-                .disabled(exportPassphrase.isEmpty || exportPassphrase != exportPassphraseConfirm)
+                .disabled(exportPassphrase.count < 8 || exportPassphrase != exportPassphraseConfirm)
             } message: {
-                Text("Used to encrypt the backup. Choose something memorable — there is no recovery if you forget.")
+                Text("Use at least 8 characters. Choose something memorable — there is no recovery if you forget.")
             }
             .alert("Enter passphrase", isPresented: $showingImportPassphrase) {
                 SecureField("Passphrase", text: $importPassphrase)
@@ -202,11 +192,30 @@ struct SettingsSheet: View {
                 ShareSheet(items: [url])
                     .presentationDetents([.medium, .large])
             }
-            .sheet(isPresented: $showingAlphaConfirmation) {
-                AlphaConfirmationSheet(alphaEnabled: $settings.alphaModeEnabled)
+            .sheet(isPresented: $showingPaywall, onDismiss: { postImportSkippedOlder = 0 }) {
+                PaywallSheet(
+                    contextLine: postImportSkippedOlder > 0
+                        ? "Imported the last 14 days. \(postImportSkippedOlder) older records were skipped — unlock Premium, then import the same file again to fill in the rest."
+                        : nil
+                )
             }
-            .sheet(isPresented: $showingGoogleConfirmation) {
-                GoogleConfirmationSheet(selectedProvider: $settings.refinementProvider)
+            .sheet(isPresented: $showingTrackingLog) {
+                LiveTrackingLogSheet()
+            }
+            .fullScreenCover(isPresented: $showingTrackingOnboarding) {
+                LiveTrackingOnboardingSheet(
+                    onContinue: {
+                        settings.liveTrackingOnboarded = true
+                        settings.liveTrackingEnabled = true
+                        environment.tracker.setEnabled(true)
+                        environment.tracker.requestAlwaysAuthorization()
+                        showingTrackingOnboarding = false
+                    },
+                    onCancel: {
+                        settings.liveTrackingEnabled = false
+                        showingTrackingOnboarding = false
+                    }
+                )
             }
             .alert("Refine entire history?", isPresented: $showingRefineHistoryConfirm) {
                 Button("Cancel", role: .cancel) {}
@@ -223,39 +232,16 @@ struct SettingsSheet: View {
         }
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
+        .presentationBackground(.thickMaterial)
     }
 
-    /// Built per-provider so the user sees their actual cost exposure up front.
     private var refineHistoryWarningText: String {
         let dayCount = environment.daysWithData.count
-        let estimatedRequests = max(1, dayCount * 5)
-        let providerLine: String
-        switch settings.refinementProvider {
-        case .apple:
-            providerLine = "Provider: Apple Maps (no API cost). Transit / flight trips will be skipped."
-        case .google:
-            let estimatedDollars = Double(estimatedRequests) * 0.005
-            providerLine = String(
-                format: "Provider: Google Maps. ~%d requests, up to ~$%.2f at standard rates (free tier covers a lot).",
-                estimatedRequests, estimatedDollars
-            )
-        }
         return """
         \(dayCount) days will be processed, newest first.
 
-        \(providerLine)
-
-        Some trips may be skipped — sparse GPS, network errors, or modes the provider doesn't route. This may take a long time. You can cancel at any moment.
+        Some trips may be skipped — sparse GPS, network errors, or modes the routing service doesn't cover. This may take a long time. You can cancel at any moment.
         """
-    }
-
-    private var alphaFooterText: String {
-        switch settings.refinementProvider {
-        case .apple:
-            "Apple Maps via MKDirections. Endpoint coordinates (rounded to ~11 m) leave your device; no API key, no Apple ID binding. Transit polylines are not exposed by Apple's API."
-        case .google:
-            "Google Directions API. Endpoint coordinates (rounded to ~11 m) plus your personal API key leave your device on every request. Google sees these calls under your Google Cloud account — not the app developer's."
-        }
     }
 
     // MARK: - Plaintext Takeout import row
@@ -289,12 +275,14 @@ struct SettingsSheet: View {
         }
     }
 
-    private func handleFilePick(_ result: Result<URL, Error>) {
-        switch result {
-        case let .success(url):
-            Task { await environment.importTakeout(from: url) }
-        case let .failure(error):
-            lastImportError = error.localizedDescription
+    private func handleFilePick(_ url: URL) {
+        Task {
+            await environment.importTakeout(from: url, cutoff: premium.importCutoff)
+            if case let .completed(_, _, skippedOlder) = environment.importStatus,
+               skippedOlder > 0 {
+                postImportSkippedOlder = skippedOlder
+                showingPaywall = true
+            }
         }
     }
 
@@ -357,15 +345,10 @@ struct SettingsSheet: View {
         }
     }
 
-    private func handleEncryptedFilePick(_ result: Result<URL, Error>) {
-        switch result {
-        case let .success(url):
-            pendingImportURL = url
-            importPassphrase = ""
-            showingImportPassphrase = true
-        case let .failure(error):
-            environment.exportStatus = .failed(message: error.localizedDescription)
-        }
+    private func handleEncryptedFilePick(_ url: URL) {
+        pendingImportURL = url
+        importPassphrase = ""
+        showingImportPassphrase = true
     }
 
     private func runImport() {

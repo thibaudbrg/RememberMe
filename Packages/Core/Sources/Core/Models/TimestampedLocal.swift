@@ -16,18 +16,30 @@ public struct TimestampedLocal: Hashable, Sendable, Codable {
 }
 
 extension TimestampedLocal {
+    /// Formatter for timestamps with fractional seconds (the common Takeout case). Hoisted so
+    /// large imports don't allocate a fresh `ISO8601DateFormatter` per record.
+    private static let fractionalFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
+    /// Fallback formatter for records that omit fractional seconds.
+    private static let plainFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter
+    }()
+
     /// Parse an ISO 8601 timestamp with offset, e.g. `"2023-08-23T07:52:01.117+02:00"` or `"2024-01-15T08:00:00.000Z"`.
     /// Returns `nil` on malformed input.
     public static func parse(iso8601: String) -> TimestampedLocal? {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        guard let date = formatter.date(from: iso8601) else {
-            // Try again without fractional seconds (some records omit them).
-            formatter.formatOptions = [.withInternetDateTime]
-            guard let fallback = formatter.date(from: iso8601) else { return nil }
-            return TimestampedLocal(date: fallback, tzOffsetMinutes: extractOffsetMinutes(from: iso8601))
+        if let date = fractionalFormatter.date(from: iso8601) {
+            return TimestampedLocal(date: date, tzOffsetMinutes: extractOffsetMinutes(from: iso8601))
         }
-        return TimestampedLocal(date: date, tzOffsetMinutes: extractOffsetMinutes(from: iso8601))
+        // Try again without fractional seconds (some records omit them).
+        guard let fallback = plainFormatter.date(from: iso8601) else { return nil }
+        return TimestampedLocal(date: fallback, tzOffsetMinutes: extractOffsetMinutes(from: iso8601))
     }
 
     private static func extractOffsetMinutes(from iso8601: String) -> Int {

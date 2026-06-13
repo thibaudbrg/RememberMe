@@ -1,0 +1,25 @@
+{
+  "name": "rm-route-proxy",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Anonymous Google Directions proxy for RememberMe, gated by Apple App Attest.",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "deploy:dev": "wrangler deploy --env dev",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@peculiar/asn1-schema": "2.8.0",
+    "@peculiar/asn1-x509": "2.6.0",
+    "@peculiar/x509": "2.0.0",
+    "cbor-x": "1.6.4",
+    "reflect-metadata": "0.2.2"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "4.20260612.1",
+    "typescript": "5.5.4",
+    "wrangler": "4.100.0"
+  }
+}

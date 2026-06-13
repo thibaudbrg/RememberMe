@@ -4,8 +4,8 @@ import Persistence
 import SwiftUI
 
 /// Full-screen comparison map for one trip's refinement choices. Draws the recorded GPS
-/// samples (when present) plus **all** candidate routes returned by Apple Maps, each in
-/// a distinct color. The user can switch which candidate is selected; Apply commits it.
+/// samples (when present) plus **all** candidate routes returned by the routing service,
+/// each in a distinct color. The user can switch which candidate is selected; Apply commits it.
 struct RefinementMapView: View {
     @Environment(AppEnvironment.self) private var environment
     @Environment(Settings.self) private var settings
@@ -21,6 +21,9 @@ struct RefinementMapView: View {
     @State private var selectedIndex: Int
     @State private var position: MapCameraPosition = .automatic
     @State private var applying = false
+    /// Recorded GPS samples for the trip/journey. Populated once in `onAppear` so the full
+    /// path-sample scan doesn't re-run on every body evaluation.
+    @State private var recordedSamples: [Coordinate] = []
 
     init(
         trip: TripSummary,
@@ -36,10 +39,10 @@ struct RefinementMapView: View {
         _selectedIndex = State(initialValue: selectedIndex)
     }
 
-    /// The recorded GPS samples to compare against. For a single trip, just that trip's
-    /// time-sliced samples. For a journey, concatenate every leg's samples so the
+    /// Loads the recorded GPS samples to compare against. For a single trip, just that
+    /// trip's time-sliced samples. For a journey, concatenate every leg's samples so the
     /// "Recorded" line covers the whole A→B span.
-    private var recordedSamples: [Coordinate] {
+    private func loadRecordedSamples() -> [Coordinate] {
         if let journey {
             return journey.trips.flatMap { environment.recordedSamples(forTrip: $0) }
         }
@@ -65,7 +68,10 @@ struct RefinementMapView: View {
         }
         .navigationTitle("Compare routes")
         .navigationBarTitleDisplayMode(.inline)
-        .onAppear { position = fitPosition }
+        .onAppear {
+            recordedSamples = loadRecordedSamples()
+            position = fitPosition
+        }
     }
 
     // MARK: - Map
@@ -260,7 +266,7 @@ struct RefinementMapView: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
             } else {
-                Text("No GPS samples to compare against — applying treats Apple Maps as ground truth.")
+                Text("No GPS samples to compare against — applying treats the suggested route as ground truth.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)

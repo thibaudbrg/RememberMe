@@ -43,6 +43,43 @@ final class QueriesTests: XCTestCase {
         XCTAssertNil(try Persistence.fetchPlace(in: database, placeID: "nope"))
     }
 
+    // MARK: - Place resolution progress
+
+    func testPlaceResolutionProgressCountsDistinctPlaces() throws {
+        let ts = TimestampedLocal(date: Date(timeIntervalSince1970: 1_700_000_000), tzOffsetMinutes: 0)
+        // 3 visits across 2 distinct places — distinct count is 2.
+        try EventWriter(database: database).write([
+            makeVisit(placeID: "alpha", at: Coordinate(latitude: 1, longitude: 1), start: ts, end: ts),
+            makeVisit(placeID: "alpha", at: Coordinate(latitude: 1, longitude: 1), start: ts, end: ts),
+            makeVisit(placeID: "beta", at: Coordinate(latitude: 2, longitude: 2), start: ts, end: ts),
+        ])
+
+        var progress = try Persistence.fetchPlaceResolutionProgress(in: database)
+        XCTAssertEqual(progress.total, 2)
+        XCTAssertEqual(progress.resolved, 0)
+
+        // Resolve alpha.
+        try Persistence.upsertPlace(
+            in: database,
+            placeID: "alpha",
+            coordinate: Coordinate(latitude: 1, longitude: 1),
+            resolvedLabel: "Alpha Place"
+        )
+        progress = try Persistence.fetchPlaceResolutionProgress(in: database)
+        XCTAssertEqual(progress.total, 2)
+        XCTAssertEqual(progress.resolved, 1)
+
+        // Resolve beta. Now 100%.
+        try Persistence.upsertPlace(
+            in: database,
+            placeID: "beta",
+            coordinate: Coordinate(latitude: 2, longitude: 2),
+            resolvedLabel: "Beta Place"
+        )
+        progress = try Persistence.fetchPlaceResolutionProgress(in: database)
+        XCTAssertEqual(progress.resolved, progress.total)
+    }
+
     // MARK: - Visit history
 
     func testFetchVisitHistoryReturnsVisitsForPlaceOnly() throws {

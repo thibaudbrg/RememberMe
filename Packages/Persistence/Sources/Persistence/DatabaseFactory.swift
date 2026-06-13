@@ -19,13 +19,21 @@ public enum DatabaseFactory {
         try Migrations.apply(to: database)
 
         if excludeFromBackup, path != SQLCipherDatabase.inMemoryPath {
+            // WAL mode (see SQLCipherDatabase) keeps `-wal`/`-shm` sidecars next to the main file;
+            // they hold un-checkpointed pages, so excluding only the main file still leaks data
+            // into iCloud/iTunes backups. Exclude all three. The sidecars exist by now because
+            // migrations have already written through WAL.
             try setExcludeFromBackup(at: URL(fileURLWithPath: path))
+            try setExcludeFromBackup(at: URL(fileURLWithPath: path + "-wal"))
+            try setExcludeFromBackup(at: URL(fileURLWithPath: path + "-shm"))
         }
 
         return database
     }
 
     private static func setExcludeFromBackup(at url: URL) throws {
+        // A sidecar may not exist yet (e.g. an empty WAL gets checkpointed away); skip silently.
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
         var url = url
         var values = URLResourceValues()
         values.isExcludedFromBackup = true

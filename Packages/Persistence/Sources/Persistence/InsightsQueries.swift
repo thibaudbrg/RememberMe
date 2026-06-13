@@ -63,7 +63,7 @@ public struct BusiestDay: Hashable, Sendable {
 public extension Persistence {
     /// Computes the full insights summary in a single grouped fetch pass.
     static func fetchInsights(in database: SQLCipherDatabase, topPlaceLimit: Int = 8) throws -> InsightsSummary {
-        let totalEvents = try scalarInt(database, "SELECT count(*) FROM events;")
+        let totalEvents = try scalarInt(database, "SELECT count(*) FROM events WHERE is_superseded = 0;")
         let dateRange = try fetchDateRange(in: database)
         let activitiesByMode = try fetchAllActivitiesByMode(in: database)
         let topPlaces = try fetchTopPlaces(in: database, limit: topPlaceLimit)
@@ -80,7 +80,7 @@ public extension Persistence {
     private static func fetchDateRange(in database: SQLCipherDatabase) throws -> ClosedRange<Date>? {
         let stmt = try database.prepare("SELECT MIN(start_ts), MAX(end_ts) FROM events;")
         defer { stmt.finalize() }
-        guard stmt.step() == .row else { return nil }
+        guard try stmt.step() == .row else { return nil }
         let minEpoch = stmt.columnInt64(0)
         let maxEpoch = stmt.columnInt64(1)
         guard minEpoch > 0, maxEpoch > 0 else { return nil }
@@ -97,12 +97,13 @@ public extension Persistence {
                 COUNT(*) AS count
             FROM activities a
             JOIN events e ON e.id = a.event_id
+            WHERE e.is_superseded = 0
             GROUP BY a.mode
             ORDER BY total_distance DESC;
         """)
         defer { stmt.finalize() }
         var modes: [ActivityModeSummary] = []
-        while stmt.step() == .row {
+        while try stmt.step() == .row {
             modes.append(ActivityModeSummary(
                 mode: stmt.columnText(0) ?? "",
                 distanceMeters: stmt.columnDouble(1),
@@ -121,6 +122,7 @@ public extension Persistence {
                 p.user_label,
                 p.resolved_label
             FROM visits v
+            JOIN events e ON e.id = v.event_id AND e.is_superseded = 0
             LEFT JOIN places p ON p.place_id = v.place_id
             GROUP BY v.place_id
             ORDER BY visit_count DESC
@@ -129,7 +131,7 @@ public extension Persistence {
         defer { stmt.finalize() }
         try stmt.bind(1, int: limit)
         var output: [TopPlace] = []
-        while stmt.step() == .row {
+        while try stmt.step() == .row {
             guard let placeID = stmt.columnText(0) else { continue }
             output.append(TopPlace(
                 placeID: placeID,
@@ -147,12 +149,13 @@ public extension Persistence {
                 date(start_ts, 'unixepoch', 'localtime') AS day,
                 COUNT(*) AS cnt
             FROM events
+            WHERE is_superseded = 0
             GROUP BY day
             ORDER BY cnt DESC
             LIMIT 1;
         """)
         defer { stmt.finalize() }
-        guard stmt.step() == .row,
+        guard try stmt.step() == .row,
               let dayString = stmt.columnText(0) else { return nil }
         let count = stmt.columnInt(1)
 
@@ -173,6 +176,6 @@ public extension Persistence {
     private static func scalarInt(_ database: SQLCipherDatabase, _ sql: String) throws -> Int {
         let stmt = try database.prepare(sql)
         defer { stmt.finalize() }
-        return stmt.step() == .row ? stmt.columnInt(0) : 0
+        return try stmt.step() == .row ? stmt.columnInt(0) : 0
     }
 }

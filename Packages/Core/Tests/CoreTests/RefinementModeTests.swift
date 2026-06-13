@@ -46,4 +46,13 @@ final class RefinementModeTests: XCTestCase {
         // Best-effort default for unrecognized strings.
         XCTAssertEqual(RefinementMode.map(recordedMode: "skateboarding"), .walking)
     }
+
+    func testGranularTransitModesMapToTransitNotVehicleOrWalking() {
+        // "cable car" must not match the "car" substring -> automobile, and "ferry" must not
+        // fall through to the walking default. These are leg displayModes/raw strings fed back
+        // through map() after a journey apply.
+        for mode in ["cable car", "Cable Car", "IN_CABLE_CAR", "ferry", "FERRY", "in ferry", "tram", "IN_TRAM"] {
+            XCTAssertEqual(RefinementMode.map(recordedMode: mode), .transit, "for \(mode)")
+        }
+    }
 }

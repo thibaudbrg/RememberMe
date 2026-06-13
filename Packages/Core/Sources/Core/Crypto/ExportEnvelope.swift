@@ -107,6 +107,21 @@ public enum ExportEnvelope {
         }
         guard header.v == version else { throw Failure.unsupportedVersion(header.v) }
         guard header.kdf == "argon2id" else { throw Failure.unsupportedKDF(header.kdf) }
+        // The header (including m/t/p) is not authenticated by the AAD, so a tampered file can
+        // carry hostile cost parameters. Reject out-of-range values before deriving: this keeps
+        // them positive and inside UInt32 range (so Argon2Swift's trapping conversions can't
+        // trap) and caps memory at 512 MiB so we can't be driven to a jetsam.
+        guard (8192 ... 524_288).contains(header.m),
+              (1 ... 16).contains(header.t),
+              (1 ... 4).contains(header.p)
+        else {
+            throw Failure.headerDecode("kdf parameters out of range")
+        }
+        // The AAD provides domain separation only if we check it equals our constant — an
+        // attacker can otherwise rewrite both the header field and the value fed to `open`.
+        guard header.aad == String(decoding: aad, as: UTF8.self) else {
+            throw Failure.headerDecode("unexpected aad")
+        }
         guard let salt = Data(base64Encoded: header.salt),
               let nonceBytes = Data(base64Encoded: header.nonce)
         else {

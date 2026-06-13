@@ -10,7 +10,7 @@ public struct ExportPayload: Codable, Equatable, Sendable {
     public let events: [ExportedEvent]
     public let places: [ExportedPlace]
 
-    public init(version: Int = 1, exportedAt: Date, events: [ExportedEvent], places: [ExportedPlace]) {
+    public init(version: Int = 2, exportedAt: Date, events: [ExportedEvent], places: [ExportedPlace]) {
         self.version = version
         self.exportedAt = exportedAt
         self.events = events
@@ -35,6 +35,9 @@ public struct ExportedEvent: Codable, Equatable, Sendable {
     public let endTzOffsetMin: Int
     public let source: String
     public let importedAt: Int64
+    /// Refinement state (payload v2). Defaults keep v1 files decodable.
+    public let isSuperseded: Bool
+    public let derivedFromEventID: String?
 
     public let activity: ExportedActivity?
     public let visit: ExportedVisit?
@@ -49,6 +52,8 @@ public struct ExportedEvent: Codable, Equatable, Sendable {
         endTzOffsetMin: Int,
         source: String,
         importedAt: Int64,
+        isSuperseded: Bool = false,
+        derivedFromEventID: String? = nil,
         activity: ExportedActivity? = nil,
         visit: ExportedVisit? = nil,
         pathPoints: [ExportedPathPoint]? = nil
@@ -61,9 +66,29 @@ public struct ExportedEvent: Codable, Equatable, Sendable {
         self.endTzOffsetMin = endTzOffsetMin
         self.source = source
         self.importedAt = importedAt
+        self.isSuperseded = isSuperseded
+        self.derivedFromEventID = derivedFromEventID
         self.activity = activity
         self.visit = visit
         self.pathPoints = pathPoints
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        kind = try container.decode(String.self, forKey: .kind)
+        startTs = try container.decode(Int64.self, forKey: .startTs)
+        startTzOffsetMin = try container.decode(Int.self, forKey: .startTzOffsetMin)
+        endTs = try container.decode(Int64.self, forKey: .endTs)
+        endTzOffsetMin = try container.decode(Int.self, forKey: .endTzOffsetMin)
+        source = try container.decode(String.self, forKey: .source)
+        importedAt = try container.decode(Int64.self, forKey: .importedAt)
+        // v1 files predate these keys.
+        isSuperseded = try container.decodeIfPresent(Bool.self, forKey: .isSuperseded) ?? false
+        derivedFromEventID = try container.decodeIfPresent(String.self, forKey: .derivedFromEventID)
+        activity = try container.decodeIfPresent(ExportedActivity.self, forKey: .activity)
+        visit = try container.decodeIfPresent(ExportedVisit.self, forKey: .visit)
+        pathPoints = try container.decodeIfPresent([ExportedPathPoint].self, forKey: .pathPoints)
     }
 
     enum CodingKeys: String, CodingKey {
@@ -75,6 +100,8 @@ public struct ExportedEvent: Codable, Equatable, Sendable {
         case endTzOffsetMin = "end_tz_offset_min"
         case source
         case importedAt = "imported_at"
+        case isSuperseded = "is_superseded"
+        case derivedFromEventID = "derived_from_event_id"
         case activity
         case visit
         case pathPoints = "path_points"

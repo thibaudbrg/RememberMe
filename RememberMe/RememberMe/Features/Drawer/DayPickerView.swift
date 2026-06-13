@@ -170,13 +170,9 @@ private struct CalendarSheet: View {
                 Spacer()
                 if !Calendar.current.isDateInToday(selection) {
                     Button("Today") {
+                        // Setting selection fires the .onChange(of: selection) handler below,
+                        // which drops back to single-day view and loads the day.
                         selection = Date()
-                        Task {
-                            // Drop back to single-day view — picking a specific date in
-                            // the calendar always means "show me that day".
-                            await environment.selectRange(.day)
-                            await environment.selectDay(Date())
-                        }
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)

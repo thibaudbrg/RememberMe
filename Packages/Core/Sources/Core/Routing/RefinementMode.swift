@@ -24,6 +24,17 @@ public extension RefinementMode {
         // Flight: skip entirely.
         if needle.contains("flight") { return nil }
 
+        // Granular transit modes that must be caught before the vehicle block: "cable car" /
+        // "IN_CABLE_CAR" would otherwise match the "car" substring → automobile, and "ferry"
+        // would fall through to the walking default. These are leg displayModes/raw strings
+        // applyJourney persists, so they get fed back through map().
+        if needle.contains("cable car") || needle.contains("cable_car")
+            || needle.contains("ferry")
+            || needle.contains("tram")
+        {
+            return .transit
+        }
+
         // Vehicles — checked before walk-family so "motorcycling" doesn't fall into cycling.
         if needle.contains("motorcycl")
             || needle.contains("vehicle")

@@ -24,7 +24,11 @@ public enum GreatCircle {
         let centralAngle = 2 * asin(min(1, sqrt(haversine)))
 
         // Below ~25 km, the curvature is invisible at any sane zoom — straight line.
-        if centralAngle < 0.004 { return [start, end] }
+        if centralAngle < 0.004 {
+            // Keep the end continuous with the start across the dateline so MapPolyline
+            // doesn't draw a world-spanning line when start/end straddle ±180°.
+            return [start, Coordinate(latitude: end.latitude, longitude: unwrap(end.longitude, against: start.longitude))]
+        }
 
         let sinAngle = sin(centralAngle)
         var coordinates: [Coordinate] = []
@@ -44,12 +48,29 @@ public enum GreatCircle {
             let interpolatedLat = atan2(zPoint, sqrt(xPoint * xPoint + yPoint * yPoint))
             let interpolatedLon = atan2(yPoint, xPoint)
 
+            // atan2 always returns a longitude in (-180, 180], so consecutive points jump from
+            // ~+179 to ~-179 across the dateline. Unwrap each one against the previous point so
+            // the arc stays longitude-continuous for MapPolyline (it accepts out-of-range lon).
+            var lonDegrees = interpolatedLon.radiansToDegrees
+            if let prev = coordinates.last {
+                lonDegrees = unwrap(lonDegrees, against: prev.longitude)
+            }
+
             coordinates.append(Coordinate(
                 latitude: interpolatedLat.radiansToDegrees,
-                longitude: interpolatedLon.radiansToDegrees
+                longitude: lonDegrees
             ))
         }
         return coordinates
+    }
+
+    /// Shifts `longitude` by whole turns of 360° so it lands within ±180° of `reference`,
+    /// keeping a polyline continuous across the antimeridian.
+    private static func unwrap(_ longitude: Double, against reference: Double) -> Double {
+        var lon = longitude
+        while lon - reference > 180 { lon -= 360 }
+        while lon - reference < -180 { lon += 360 }
+        return lon
     }
 }
 

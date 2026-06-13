@@ -22,8 +22,6 @@
 	<string>1</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
-	<key>LSSupportsOpeningDocumentsInPlace</key>
-	<true/>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsArbitraryLoads</key>
@@ -31,17 +29,25 @@
 	</dict>
 	<key>NSFaceIDUsageDescription</key>
 	<string>RememberMe uses Face ID to unlock your history when you enable the optional app lock.</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>RememberMe records your trips and places in an encrypted database on this device, even when the app isn't open. Place names are looked up via Apple's geocoding service.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>RememberMe centers the map on your current location. Your location is never sent anywhere.</string>
+	<string>RememberMe centers the map on your current location and names visited places using Apple's geocoding service.</string>
+	<key>NSMotionUsageDescription</key>
+	<string>Used to classify trips as walking, driving, or cycling without leaving the device.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>RememberMe overlays photos taken at the places you visited that day. Photos stay on your device — nothing is uploaded.</string>
+	<key>PHPhotoLibraryPreventAutomaticLimitedAccessAlert</key>
+	<true/>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>location</string>
+	</array>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
 		<false/>
 	</dict>
-	<key>UIFileSharingEnabled</key>
-	<true/>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>UISupportedInterfaceOrientations</key>

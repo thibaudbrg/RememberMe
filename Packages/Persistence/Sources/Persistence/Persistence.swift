@@ -32,7 +32,7 @@ public enum Persistence {
     private static func scalarInt(_ database: SQLCipherDatabase, sql: String) throws -> Int {
         let stmt = try database.prepare(sql)
         defer { stmt.finalize() }
-        switch stmt.step() {
+        switch try stmt.step() {
         case .row: return stmt.columnInt(0)
         case .done: return 0
         }

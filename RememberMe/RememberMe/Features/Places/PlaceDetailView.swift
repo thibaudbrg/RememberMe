@@ -131,6 +131,8 @@ struct PlaceDetailView: View {
                                         id: photo.id,
                                         coordinate: photo.coordinate
                                     ))
+                                    // Keep this focus through the sheet's onDismiss clearFocus.
+                                    environment.suppressNextFocusClear()
                                     dismiss()
                                 }
                         }
@@ -190,6 +192,9 @@ struct PlaceDetailView: View {
         let target = item.start.date
         let coordinate = marker.coordinate
         let placeID = marker.placeID
+        // navigate(...) sets a fresh focus; suppress the sheet's onDismiss clearFocus so it
+        // doesn't race the navigation and wipe the focus we're jumping to.
+        environment.suppressNextFocusClear()
         dismiss()
         Task {
             await environment.navigate(

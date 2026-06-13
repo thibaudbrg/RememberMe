@@ -97,9 +97,14 @@ public enum PolylineDirection {
             ? (target - cumulative[segmentStart]) / segmentLength
             : 0
 
+        // Normalize the longitude delta into [-180, 180] so a marker on a segment straddling the
+        // antimeridian (e.g. +179.5 to -179.5) is placed across the dateline, not back around the world.
+        var dLon = endCoord.longitude - startCoord.longitude
+        while dLon > 180 { dLon -= 360 }
+        while dLon < -180 { dLon += 360 }
         let coord = Coordinate(
             latitude: startCoord.latitude + (endCoord.latitude - startCoord.latitude) * fraction,
-            longitude: startCoord.longitude + (endCoord.longitude - startCoord.longitude) * fraction
+            longitude: startCoord.longitude + dLon * fraction
         )
         let bearing = bearingDegrees(from: startCoord, to: endCoord)
         return Placement(coordinate: coord, bearing: bearing)
@@ -115,7 +120,9 @@ public enum PolylineDirection {
         let sinHalfDLon = sin(dLon / 2)
         let central = sinHalfDLat * sinHalfDLat
             + cos(lat1) * cos(lat2) * sinHalfDLon * sinHalfDLon
-        let angular = 2 * atan2(sqrt(central), sqrt(1 - central))
+        // `central` is mathematically <= 1 but can exceed it by a few ulps for near-antipodal
+        // points; clamp so sqrt never sees a negative operand (which would return NaN).
+        let angular = 2 * atan2(sqrt(central), sqrt(max(0, 1 - central)))
         return earthRadiusMeters * angular
     }
 

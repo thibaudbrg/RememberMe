@@ -98,6 +98,17 @@ final class DayQueriesTests: XCTestCase {
     }
 
     func testFetchDaysWithDataReturnsDistinctDescending() throws {
+        // Production fetchDaysWithData buckets with SQLite's 'localtime' (the C library timezone).
+        // Pin TZ=UTC so the 12:00Z/15:00Z fixtures reliably collapse onto one day — otherwise the
+        // test fails in UTC+9..+12 zones, where 15:00Z spills into the next local day.
+        let previousTZ = getenv("TZ").map { String(cString: $0) }
+        setenv("TZ", "UTC", 1)
+        tzset()
+        defer {
+            if let previousTZ { setenv("TZ", previousTZ, 1) } else { unsetenv("TZ") }
+            tzset()
+        }
+
         try EventWriter(database: database).write([
             makeVisit(placeID: "a", at: Coordinate(latitude: 0, longitude: 0), date: isoDate("2024-01-10T12:00:00Z")),
             makeVisit(placeID: "b", at: Coordinate(latitude: 0, longitude: 0), date: isoDate("2024-01-10T15:00:00Z")),
@@ -108,6 +119,44 @@ final class DayQueriesTests: XCTestCase {
         XCTAssertEqual(days.count, 2) // 2024-01-10 and 2024-01-12
         // descending
         XCTAssertGreaterThan(days[0], days[1])
+    }
+
+    func testVisitSpanningMidnightAppearsInBothDays() throws {
+        // Pin TZ=UTC so the dayRange windows line up with the UTC fixture timestamps.
+        let previousTZ = getenv("TZ").map { String(cString: $0) }
+        setenv("TZ", "UTC", 1)
+        tzset()
+        defer {
+            if let previousTZ { setenv("TZ", previousTZ, 1) } else { unsetenv("TZ") }
+            tzset()
+        }
+
+        // An overnight home visit: arrive 20:00 on the 15th, leave 08:00 on the 16th.
+        let arrive = isoDate("2024-01-15T20:00:00Z")
+        let depart = isoDate("2024-01-16T08:00:00Z")
+        let overnight = Event(
+            start: TimestampedLocal(date: arrive, tzOffsetMinutes: 0),
+            end: TimestampedLocal(date: depart, tzOffsetMinutes: 0),
+            source: "test",
+            kind: .visit(VisitDetails(
+                placeID: "home",
+                location: Coordinate(latitude: 0, longitude: 0),
+                semanticType: "Unknown",
+                hierarchyLevel: 0,
+                probability: 1
+            ))
+        )
+        try EventWriter(database: database).write([overnight])
+
+        let day15 = dayRange(around: arrive)
+        let day16 = dayRange(around: depart)
+
+        // It starts on the 15th, so it shows there as before…
+        XCTAssertEqual(try Persistence.fetchTimeline(in: database, dayRange: day15).count, 1)
+        XCTAssertEqual(try Persistence.fetchDaySummary(in: database, dayRange: day15).visitCount, 1)
+        // …and now also on the 16th, because the overlap predicate matches its end_ts.
+        XCTAssertEqual(try Persistence.fetchTimeline(in: database, dayRange: day16).count, 1)
+        XCTAssertEqual(try Persistence.fetchDaySummary(in: database, dayRange: day16).visitCount, 1)
     }
 
     // MARK: - Helpers

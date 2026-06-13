@@ -2,10 +2,11 @@
 import XCTest
 
 final class ExportEnvelopeTests: XCTestCase {
-    // Test parameters: trivially small (m=8 KiB, t=1, p=1) to keep the suite fast.
-    // Real exports use `.strong`. The envelope code shouldn't care.
+    // Test parameters: smallest values the envelope's `open` bounds-check accepts (m=8 MiB,
+    // t=1, p=1) to keep the suite fast. Real exports use `.strong`. The envelope code shouldn't
+    // care beyond the range validation.
     private let fastParams = PassphraseKDF.Parameters(
-        memoryKiB: 8,
+        memoryKiB: 8192,
         iterations: 1,
         parallelism: 1,
         keyLengthBytes: 32
@@ -50,6 +51,76 @@ final class ExportEnvelopeTests: XCTestCase {
         XCTAssertThrowsError(try ExportEnvelope.open(envelope: bytes, passphrase: "pw")) { error in
             XCTAssertEqual(error as? ExportEnvelope.Failure, .truncated)
         }
+    }
+
+    func testRejectsOutOfRangeKDFParameters() throws {
+        // Hostile cost params must be rejected before deriving (m far above the 512 MiB cap
+        // would otherwise trap/OOM in Argon2Swift). Re-emit the header with each bad value,
+        // keeping the body intact so the failure can only come from the bounds check.
+        let badHeaders = [
+            headerOverriding(m: 8_000_000),  // ~8 GiB
+            headerOverriding(m: -1),         // negative
+            headerOverriding(t: 0),          // below floor
+            headerOverriding(t: 17),         // above ceiling
+            headerOverriding(p: 0),
+            headerOverriding(p: 5),
+        ]
+        for header in badHeaders {
+            let envelope = try rebuiltEnvelope(header: header)
+            XCTAssertThrowsError(try ExportEnvelope.open(envelope: envelope, passphrase: "pw")) { error in
+                guard case .headerDecode = error as? ExportEnvelope.Failure else {
+                    return XCTFail("expected .headerDecode for header \(header), got \(error)")
+                }
+            }
+        }
+    }
+
+    func testRejectsMismatchedAAD() throws {
+        let envelope = try rebuiltEnvelope(header: headerOverriding(aad: "rememberme-export-v2"))
+        XCTAssertThrowsError(try ExportEnvelope.open(envelope: envelope, passphrase: "pw")) { error in
+            guard case .headerDecode = error as? ExportEnvelope.Failure else {
+                return XCTFail("expected .headerDecode, got \(error)")
+            }
+        }
+    }
+
+    /// A valid header captured from a real seal, reused as the base for tampering tests.
+    private lazy var sealedHeader: ExportEnvelope.Header = {
+        let sealed = try! ExportEnvelope.seal(payload: Data("x".utf8), passphrase: "pw", parameters: fastParams)
+        let headerLen = Int(sealed.subdata(in: 4 ..< 8).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian })
+        let headerData = sealed.subdata(in: 8 ..< 8 + headerLen)
+        return try! JSONDecoder().decode(ExportEnvelope.Header.self, from: headerData)
+    }()
+
+    /// Returns the captured valid header with one field overridden (its `let` fields require a
+    /// full reconstruction).
+    private func headerOverriding(
+        m: Int? = nil, t: Int? = nil, p: Int? = nil, aad: String? = nil
+    ) -> ExportEnvelope.Header {
+        let base = sealedHeader
+        return ExportEnvelope.Header(
+            v: base.v, kdf: base.kdf,
+            m: m ?? base.m, t: t ?? base.t, p: p ?? base.p,
+            salt: base.salt, nonce: base.nonce, aad: aad ?? base.aad
+        )
+    }
+
+    /// Re-emits an RMEX envelope around `header`, copying the body from a fresh seal so only the
+    /// header differs. Decryption would fail (the body's nonce/salt won't match a tampered
+    /// header), but these tests only exercise checks that fire *before* derivation.
+    private func rebuiltEnvelope(header: ExportEnvelope.Header) throws -> Data {
+        let sealed = try ExportEnvelope.seal(payload: Data("x".utf8), passphrase: "pw", parameters: fastParams)
+        let headerLen = Int(sealed.subdata(in: 4 ..< 8).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian })
+        let body = sealed.subdata(in: 8 + headerLen ..< sealed.count)
+
+        let headerJSON = try JSONEncoder().encode(header)
+        var output = Data()
+        output.append(ExportEnvelope.magic)
+        var len = UInt32(headerJSON.count).littleEndian
+        output.append(withUnsafeBytes(of: &len) { Data($0) })
+        output.append(headerJSON)
+        output.append(body)
+        return output
     }
 
     func testEmptyPassphraseRejectedAtSeal() throws {

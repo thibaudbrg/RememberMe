@@ -7,11 +7,13 @@ import Security
 /// - `kSecClass = kSecClassGenericPassword`
 /// - `kSecAttrService = <service>` (defaults to `"RememberMe.DB"`)
 /// - `kSecAttrAccount = <account>` (defaults to `"primary"`)
-/// - `kSecAttrAccessible = kSecAttrAccessibleWhenUnlockedThisDeviceOnly`
+/// - `kSecAttrAccessible = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`
 /// - `kSecAttrSynchronizable = false`
 ///
-/// `WhenUnlocked` means the key is unreadable while the device is locked. Pairs with
-/// `NSFileProtectionComplete` on the DB file. Tradeoff is documented in SECURITY.md.
+/// `AfterFirstUnlock` means the key is readable once the device has been unlocked at least
+/// once since boot, so background location relaunches (which can fire while the device is
+/// locked in a pocket) can still open the encrypted DB. Pairs with the DB file's
+/// `completeUntilFirstUserAuthentication` protection. Tradeoff is documented in SECURITY.md.
 public final class KeychainKeyStore: KeyStore, @unchecked Sendable {
     public let service: String
     public let account: String
@@ -23,10 +25,23 @@ public final class KeychainKeyStore: KeyStore, @unchecked Sendable {
 
     public func getOrCreateKey() throws -> DatabaseKey {
         if let existing = try fetchKey() {
+            // Accessibility is fixed at `SecItemAdd` time, so items written before the
+            // migration to `AfterFirstUnlock` keep the old `WhenUnlocked` class. Update them
+            // in place on this (necessarily unlocked) read path. Idempotent for new items.
+            migrateAccessibility()
             return existing
         }
         let fresh = try DatabaseKey(rawBytes: SecureRandom.bytes(DatabaseKey.lengthInBytes))
-        try storeKey(fresh)
+        do {
+            try storeKey(fresh)
+        } catch KeyStoreError.keychainOperationFailed(errSecDuplicateItem) {
+            // Another caller raced us between fetchKey() and storeKey() and won — re-fetch
+            // their key instead of failing. If the item somehow vanished again, surface that.
+            guard let winner = try fetchKey() else {
+                throw KeyStoreError.keychainOperationFailed(status: errSecDuplicateItem)
+            }
+            return winner
+        }
         return fresh
     }
 
@@ -80,11 +95,22 @@ public final class KeychainKeyStore: KeyStore, @unchecked Sendable {
     private func storeKey(_ key: DatabaseKey) throws {
         var attributes = baseQuery()
         attributes[kSecValueData as String] = key.rawBytes
-        attributes[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        attributes[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
 
         let status = SecItemAdd(attributes as CFDictionary, nil)
         guard status == errSecSuccess else {
             throw KeyStoreError.keychainOperationFailed(status: status)
         }
+    }
+
+    /// Updates an existing item's accessibility to `AfterFirstUnlockThisDeviceOnly`. Best-effort
+    /// and idempotent: a no-op once the item already has the target class. Called only after a
+    /// successful fetch (the item is readable, i.e. the device is unlocked), so the update can
+    /// proceed. Failures are ignored — the key is still usable; the next unlocked launch retries.
+    private func migrateAccessibility() {
+        let update: [String: Any] = [
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        ]
+        _ = SecItemUpdate(baseQuery() as CFDictionary, update as CFDictionary)
     }
 }

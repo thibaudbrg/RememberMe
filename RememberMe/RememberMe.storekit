@@ -1,0 +1,71 @@
+{
+  "identifier" : "8E2D9B14C7A14F52B6E03D71",
+  "nonRenewingSubscriptions" : [
+
+  ],
+  "products" : [
+    {
+      "displayPrice" : "15.00",
+      "familyShareable" : false,
+      "internalID" : "1A6F2C83D94E47B1A05C8E22",
+      "localizations" : [
+        {
+          "description" : "Pay once. Refinement and full-history import, forever.",
+          "displayName" : "Premium Lifetime",
+          "locale" : "en_US"
+        }
+      ],
+      "productID" : "app.wave9617.plantain4773.premium.lifetime",
+      "referenceName" : "Premium Lifetime",
+      "type" : "NonConsumable"
+    }
+  ],
+  "settings" : {
+    "_failTransactionsEnabled" : false,
+    "_locale" : "en_US",
+    "_storefront" : "CHE",
+    "_storeKitErrors" : [
+
+    ]
+  },
+  "subscriptionGroups" : [
+    {
+      "id" : "5C3B7A91E2D64F08A7B19D44",
+      "localizations" : [
+
+      ],
+      "name" : "Premium",
+      "subscriptions" : [
+        {
+          "adHocOffers" : [
+
+          ],
+          "codeOffers" : [
+
+          ],
+          "displayPrice" : "1.00",
+          "familyShareable" : false,
+          "groupNumber" : 1,
+          "internalID" : "9F4E1D27B8C34A65D20E7F13",
+          "introductoryOffer" : null,
+          "localizations" : [
+            {
+              "description" : "Refinement and full-history import while subscribed.",
+              "displayName" : "Premium Monthly",
+              "locale" : "en_US"
+            }
+          ],
+          "productID" : "app.wave9617.plantain4773.premium.monthly",
+          "recurringSubscriptionPeriod" : "P1M",
+          "referenceName" : "Premium Monthly",
+          "subscriptionGroupID" : "5C3B7A91E2D64F08A7B19D44",
+          "type" : "RecurringSubscription"
+        }
+      ]
+    }
+  ],
+  "version" : {
+    "major" : 4,
+    "minor" : 0
+  }
+}

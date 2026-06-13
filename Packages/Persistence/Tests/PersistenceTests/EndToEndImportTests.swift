@@ -35,7 +35,10 @@ final class EndToEndImportTests: XCTestCase {
         print("wrote \(written) events in \(String(format: "%.2f", writeSeconds))s")
 
         let counts = try Persistence.eventCounts(in: database)
-        XCTAssertEqual(counts.total, decoded.events.count)
+        // With deterministic ids + INSERT OR IGNORE, events that collide on
+        // source|kind|start|end|payload dedupe on insert — so stored total can be <= decoded count.
+        XCTAssertLessThanOrEqual(counts.total, decoded.events.count)
+        XCTAssertGreaterThan(counts.total, 0)
         XCTAssertEqual(counts.activities + counts.visits + counts.paths, counts.total)
         print(
             "counts: total=\(counts.total) activities=\(counts.activities) visits=\(counts.visits) paths=\(counts.paths)"
@@ -44,7 +47,7 @@ final class EndToEndImportTests: XCTestCase {
         // Spot-check path_points count > events of kind=path (every path has >= 1 sample).
         let pathPointsStmt = try database.prepare("SELECT count(*) FROM path_points;")
         defer { pathPointsStmt.finalize() }
-        XCTAssertEqual(pathPointsStmt.step(), .row)
+        XCTAssertEqual(try pathPointsStmt.step(), .row)
         let pathPointCount = pathPointsStmt.columnInt(0)
         XCTAssertGreaterThanOrEqual(pathPointCount, counts.paths)
         print("path_points rows: \(pathPointCount)")

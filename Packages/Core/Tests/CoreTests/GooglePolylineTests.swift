@@ -33,4 +33,18 @@ final class GooglePolylineTests: XCTestCase {
         let decoded = GooglePolyline.decode("_p~iF~ps|U_ulL")
         XCTAssertEqual(decoded.count, 1)
     }
+
+    func testRejectsOutOfRangeCharactersInsteadOfFabricating() {
+        // A space (ASCII 32) is below the valid 63...126 range. Decoding stops at the invalid
+        // byte and returns only the points fully decoded before it — no fabricated coordinate.
+        let withSpace = GooglePolyline.decode("_p~iF~ps|U _ulLnnqC")
+        XCTAssertEqual(withSpace.count, 1)
+        XCTAssertEqual(withSpace[0].latitude, 38.5, accuracy: 1e-5)
+        XCTAssertEqual(withSpace[0].longitude, -120.2, accuracy: 1e-5)
+    }
+
+    func testRejectsNonASCIICharacter() {
+        // A non-ASCII character at the very start yields no coordinates rather than garbage.
+        XCTAssertTrue(GooglePolyline.decode("é").isEmpty)
+    }
 }

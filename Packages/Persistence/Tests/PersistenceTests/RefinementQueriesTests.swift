@@ -23,14 +23,14 @@ final class RefinementQueriesTests: XCTestCase {
             let stmt = try database.prepare("SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?;")
             defer { stmt.finalize() }
             try stmt.bind(1, text: table)
-            XCTAssertEqual(stmt.step(), .row)
+            XCTAssertEqual(try stmt.step(), .row)
             XCTAssertEqual(stmt.columnInt(0), 1, "expected \(table) to exist")
         }
         XCTAssertEqual(try database.userVersion(), Schema.currentVersion)
     }
 
     func testMigrationIsIdempotent() throws {
-        // Apply again — should be a no-op (user_version already at 2).
+        // Apply again — should be a no-op (user_version already at Schema.currentVersion).
         try Migrations.apply(to: database)
         XCTAssertEqual(try database.userVersion(), Schema.currentVersion)
     }
@@ -99,7 +99,7 @@ final class RefinementQueriesTests: XCTestCase {
         XCTAssertEqual(try Persistence.fetchPathPoints(in: database, eventID: eventID).count, 1)
     }
 
-    func testRevertRestoresOriginalsAndRemovesAuditAndSnapshot() throws {
+    func testRevertClearsRefinedPointsAndDropsSnapshotAndAudit() throws {
         let eventID = try seedTripWithPath(points: originalPoints)
         let refined = [
             Coordinate(latitude: 48.8580, longitude: 2.3540),
@@ -115,13 +115,55 @@ final class RefinementQueriesTests: XCTestCase {
 
         try Persistence.revertRefinement(in: database, eventID: eventID)
 
-        // After revert there are no path_points rows under the activity id — original
-        // samples live in the sibling path event and the main map renderer falls back to
-        // time-slicing them. The refinement audit + snapshot are gone.
+        // Revert does NOT copy the snapshot back onto the activity id: it deletes the activity's
+        // path_points, the original snapshot, and the audit row. Recovery relies on the sibling
+        // `path` event (see the companion test) — so under the activity id there's nothing left.
         let restored = try Persistence.fetchPathPoints(in: database, eventID: eventID)
         XCTAssertTrue(restored.isEmpty)
         XCTAssertNil(try Persistence.refinement(in: database, eventID: eventID))
         XCTAssertEqual(try originalCount(eventID: eventID), 0)
+    }
+
+    func testRevertRecoversGeometryFromSiblingPathEvent() throws {
+        // The real post-revert recovery path: a sibling `path`-kind event (recorded alongside the
+        // activity) still holds the GPS samples, so the map renderer re-draws the trip from those.
+        let day = Date(timeIntervalSince1970: 1_700_000_000)
+        let eventID = try seedTripWithPath(points: originalPoints)
+        try database.execute("""
+            UPDATE events SET start_ts = 1700000000, end_ts = 1700001800 WHERE id = '\(eventID.uuidString)';
+        """)
+
+        // Sibling path event covering the same time window with overlapping samples.
+        let siblingSamples = originalPoints.enumerated().map { index, coord in
+            PathPoint(coordinate: coord, offsetMinutes: index)
+        }
+        try EventWriter(database: database).write([
+            Event(
+                start: TimestampedLocal(date: day, tzOffsetMinutes: 0),
+                end: TimestampedLocal(date: day.addingTimeInterval(1800), tzOffsetMinutes: 0),
+                source: "test",
+                kind: .path(siblingSamples)
+            ),
+        ])
+
+        // Refine the activity, then revert it.
+        try Persistence.applyRefinement(
+            in: database,
+            eventID: eventID,
+            originalSamples: originalPoints,
+            refinedPoints: [
+                Coordinate(latitude: 48.8580, longitude: 2.3540),
+                Coordinate(latitude: 48.8590, longitude: 2.3550),
+            ],
+            record: makeRecord(eventID: eventID, refinedCount: 2)
+        )
+        try Persistence.revertRefinement(in: database, eventID: eventID)
+
+        // The map-facing render query still returns the trip geometry — sourced from the sibling.
+        let dayRange = day ..< day.addingTimeInterval(86400)
+        let traces = try Persistence.fetchPathTraces(in: database, dayRange: dayRange)
+        XCTAssertEqual(traces.count, 1, "the sibling path event must still render after revert")
+        XCTAssertEqual(traces.first?.points.count, originalPoints.count)
     }
 
     func testApplyClearsSkippedFlag() throws {
@@ -192,7 +234,7 @@ final class RefinementQueriesTests: XCTestCase {
         )
         defer { derivedCountStmt.finalize() }
         try derivedCountStmt.bind(1, text: eventID.uuidString)
-        XCTAssertEqual(derivedCountStmt.step(), .row)
+        XCTAssertEqual(try derivedCountStmt.step(), .row)
         XCTAssertEqual(derivedCountStmt.columnInt(0), 3)
 
         // Original is superseded.
@@ -201,7 +243,7 @@ final class RefinementQueriesTests: XCTestCase {
         )
         defer { supersededStmt.finalize() }
         try supersededStmt.bind(1, text: eventID.uuidString)
-        XCTAssertEqual(supersededStmt.step(), .row)
+        XCTAssertEqual(try supersededStmt.step(), .row)
         XCTAssertEqual(supersededStmt.columnInt(0), 1)
 
         // Original snapshot stored.
@@ -239,7 +281,7 @@ final class RefinementQueriesTests: XCTestCase {
         )
         defer { derivedCountStmt.finalize() }
         try derivedCountStmt.bind(1, text: eventID.uuidString)
-        XCTAssertEqual(derivedCountStmt.step(), .row)
+        XCTAssertEqual(try derivedCountStmt.step(), .row)
         XCTAssertEqual(derivedCountStmt.columnInt(0), 0)
 
         // Original un-superseded and audit gone.
@@ -248,7 +290,7 @@ final class RefinementQueriesTests: XCTestCase {
         )
         defer { supersededStmt.finalize() }
         try supersededStmt.bind(1, text: eventID.uuidString)
-        XCTAssertEqual(supersededStmt.step(), .row)
+        XCTAssertEqual(try supersededStmt.step(), .row)
         XCTAssertEqual(supersededStmt.columnInt(0), 0)
         XCTAssertNil(try Persistence.refinement(in: database, eventID: eventID))
     }
@@ -316,7 +358,7 @@ final class RefinementQueriesTests: XCTestCase {
         try supersededCount.bind(1, text: walkID.uuidString)
         try supersededCount.bind(2, text: busID.uuidString)
         try supersededCount.bind(3, text: walk2ID.uuidString)
-        XCTAssertEqual(supersededCount.step(), .row)
+        XCTAssertEqual(try supersededCount.step(), .row)
         XCTAssertEqual(supersededCount.columnInt(0), 3)
 
         // 2 derived events linked to the primary.
@@ -325,7 +367,7 @@ final class RefinementQueriesTests: XCTestCase {
         )
         defer { derivedCount.finalize() }
         try derivedCount.bind(1, text: walkID.uuidString)
-        XCTAssertEqual(derivedCount.step(), .row)
+        XCTAssertEqual(try derivedCount.step(), .row)
         XCTAssertEqual(derivedCount.columnInt(0), 2)
 
         // Audit row carries the member list.
@@ -393,7 +435,7 @@ final class RefinementQueriesTests: XCTestCase {
         defer { supersededCount.finalize() }
         try supersededCount.bind(1, text: walkID.uuidString)
         try supersededCount.bind(2, text: busID.uuidString)
-        XCTAssertEqual(supersededCount.step(), .row)
+        XCTAssertEqual(try supersededCount.step(), .row)
         XCTAssertEqual(supersededCount.columnInt(0), 0)
 
         // No derived events left, no audit row.
@@ -402,7 +444,7 @@ final class RefinementQueriesTests: XCTestCase {
         )
         defer { derivedCount.finalize() }
         try derivedCount.bind(1, text: walkID.uuidString)
-        XCTAssertEqual(derivedCount.step(), .row)
+        XCTAssertEqual(try derivedCount.step(), .row)
         XCTAssertEqual(derivedCount.columnInt(0), 0)
         XCTAssertNil(try Persistence.refinement(in: database, eventID: walkID))
     }
@@ -474,7 +516,7 @@ final class RefinementQueriesTests: XCTestCase {
         defer { derivedStmt.finalize() }
         try derivedStmt.bind(1, text: aID.uuidString)
         var derivedIDs: [UUID] = []
-        while derivedStmt.step() == .row {
+        while try derivedStmt.step() == .row {
             if let text = derivedStmt.columnText(0), let id = UUID(uuidString: text) {
                 derivedIDs.append(id)
             }
@@ -496,7 +538,7 @@ final class RefinementQueriesTests: XCTestCase {
         try supersededCount.bind(1, text: aID.uuidString)
         try supersededCount.bind(2, text: bID.uuidString)
         try supersededCount.bind(3, text: cID.uuidString)
-        XCTAssertEqual(supersededCount.step(), .row)
+        XCTAssertEqual(try supersededCount.step(), .row)
         XCTAssertEqual(supersededCount.columnInt(0), 0, "every journey member must be un-superseded")
 
         // Zero derived events left.
@@ -505,7 +547,7 @@ final class RefinementQueriesTests: XCTestCase {
         )
         defer { derivedCount.finalize() }
         try derivedCount.bind(1, text: aID.uuidString)
-        XCTAssertEqual(derivedCount.step(), .row)
+        XCTAssertEqual(try derivedCount.step(), .row)
         XCTAssertEqual(derivedCount.columnInt(0), 0, "every derived leg must be deleted")
 
         // No audit row, no snapshot.
@@ -623,7 +665,7 @@ final class RefinementQueriesTests: XCTestCase {
         let stmt = try database.prepare("SELECT count(*) FROM path_points_original WHERE event_id = ?;")
         defer { stmt.finalize() }
         try stmt.bind(1, text: eventID.uuidString)
-        XCTAssertEqual(stmt.step(), .row)
+        XCTAssertEqual(try stmt.step(), .row)
         return stmt.columnInt(0)
     }
 

@@ -96,6 +96,127 @@ final class GoogleTakeoutDecoderTests: XCTestCase {
         XCTAssertTrue(result.skipped[0].reason.contains("exactly one"))
     }
 
+    // MARK: - Deterministic IDs (H5)
+
+    func testDecodingSameDataTwiceProducesIdenticalEventIDs() throws {
+        let data = try loadFixture(named: "google-takeout-minimal")
+        let first = try GoogleTakeoutDecoder().decode(data).events
+        let second = try GoogleTakeoutDecoder().decode(data).events
+        XCTAssertEqual(first.map(\.id), second.map(\.id), "re-decoding must yield stable ids for idempotent import")
+    }
+
+    func testDistinctRecordsGetDistinctIDs() throws {
+        let data = try loadFixture(named: "google-takeout-minimal")
+        let ids = try GoogleTakeoutDecoder().decode(data).events.map(\.id)
+        XCTAssertEqual(Set(ids).count, ids.count, "each record should hash to a unique id")
+    }
+
+    // MARK: - Lossy per-record decoding (M29)
+
+    func testMalformedRecordSkippedNotAborted() throws {
+        // First record is schema-broken (activity.start is a number, not a string); the two
+        // following well-formed records must still decode.
+        let jsonString = """
+        [
+          { "startTime": "2024-01-15T08:00:00.000Z", "endTime": "2024-01-15T09:00:00.000Z",
+            "activity": { "start": 12345, "end": "geo:1,1", "distanceMeters": "100",
+                          "topCandidate": { "type": "walking", "probability": "0.5" } } },
+          { "startTime": "2024-01-15T09:00:00.000Z", "endTime": "2024-01-15T17:00:00.000Z",
+            "visit": { "hierarchyLevel": "0", "probability": "0.9",
+                       "topCandidate": { "placeID": "X", "placeLocation": "geo:0,0",
+                                         "semanticType": "Home", "probability": "0.9" } } },
+          { "startTime": "2024-01-15T17:00:00.000Z", "endTime": "2024-01-15T17:30:00.000Z",
+            "timelinePath": [ { "point": "geo:0,0", "durationMinutesOffsetFromStartTime": "0" } ] }
+        ]
+        """
+        let result = try GoogleTakeoutDecoder().decode(Data(jsonString.utf8))
+        XCTAssertEqual(result.events.count, 2)
+        XCTAssertEqual(result.skipped.count, 1)
+        XCTAssertEqual(result.skipped.first?.recordIndex, 0)
+    }
+
+    // MARK: - Streaming decode (M28)
+
+    func testStreamingProducesSameEventsAsDecode() throws {
+        let data = try loadFixture(named: "google-takeout-minimal")
+        let nonStreaming = try GoogleTakeoutDecoder().decode(data)
+
+        var streamed: [Event] = []
+        let skipped = try GoogleTakeoutDecoder().decodeStreaming(data, batchSize: 1) { batch in
+            streamed.append(contentsOf: batch)
+        }
+        XCTAssertEqual(streamed.map(\.id), nonStreaming.events.map(\.id))
+        XCTAssertEqual(skipped.count, nonStreaming.skipped.count)
+    }
+
+    func testStreamingBatchesAreNonEmptyAndChunked() throws {
+        let data = try loadFixture(named: "google-takeout-minimal")
+        var batchSizes: [Int] = []
+        _ = try GoogleTakeoutDecoder().decodeStreaming(data, batchSize: 2) { batch in
+            XCTAssertFalse(batch.isEmpty)
+            batchSizes.append(batch.count)
+        }
+        XCTAssertEqual(batchSizes.reduce(0, +), 3)
+    }
+
+    // MARK: - Unsupported format (L46) + LocalizedError (L48)
+
+    func testRejectsAndroidWebTakeoutShape() {
+        let json = Data(#"{"semanticSegments": [], "rawSignals": []}"#.utf8)
+        XCTAssertThrowsError(try GoogleTakeoutDecoder().decode(json)) { error in
+            guard case let GoogleTakeoutDecoder.DecodeError.unsupportedFormat(detail) = error else {
+                return XCTFail("expected .unsupportedFormat, got \(error)")
+            }
+            XCTAssertTrue(detail.contains("semanticSegments"))
+        }
+    }
+
+    func testDecodeErrorIsLocalized() {
+        let error: Error = GoogleTakeoutDecoder.DecodeError.unsupportedFormat(detail: "nope")
+        XCTAssertEqual((error as NSError).localizedDescription, "nope")
+        XCTAssertFalse((error as NSError).localizedDescription.contains("error 0"))
+    }
+
+    // MARK: - Non-finite sanitisation (L50)
+
+    func testNonFiniteProbabilityAndDistanceAreSanitised() throws {
+        // probability "nan" -> 0; distanceMeters "inf" must be rejected (a non-finite distance
+        // is not a recoverable value), so the record is skipped rather than written as junk.
+        let nanProb = """
+        [ { "startTime": "2024-01-15T08:00:00.000Z", "endTime": "2024-01-15T09:00:00.000Z",
+            "activity": { "start": "geo:0,0", "end": "geo:1,1", "distanceMeters": "100",
+                          "topCandidate": { "type": "walking", "probability": "nan" } } } ]
+        """
+        let nanResult = try GoogleTakeoutDecoder().decode(Data(nanProb.utf8))
+        guard case let .activity(details)? = nanResult.events.first?.kind else {
+            return XCTFail("expected one activity event")
+        }
+        XCTAssertEqual(details.probability, 0)
+        XCTAssertTrue(details.distanceMeters.isFinite)
+
+        let infDistance = """
+        [ { "startTime": "2024-01-15T08:00:00.000Z", "endTime": "2024-01-15T09:00:00.000Z",
+            "activity": { "start": "geo:0,0", "end": "geo:1,1", "distanceMeters": "inf",
+                          "topCandidate": { "type": "walking", "probability": "0.5" } } } ]
+        """
+        let infResult = try GoogleTakeoutDecoder().decode(Data(infDistance.utf8))
+        XCTAssertEqual(infResult.events.count, 0)
+        XCTAssertEqual(infResult.skipped.count, 1)
+    }
+
+    // MARK: - Empty path (L52)
+
+    func testEmptyTimelinePathIsSkipped() throws {
+        let json = """
+        [ { "startTime": "2024-01-15T17:00:00.000Z", "endTime": "2024-01-15T17:30:00.000Z",
+            "timelinePath": [] } ]
+        """
+        let result = try GoogleTakeoutDecoder().decode(Data(json.utf8))
+        XCTAssertEqual(result.events.count, 0)
+        XCTAssertEqual(result.skipped.count, 1)
+        XCTAssertTrue(result.skipped[0].reason.contains("empty timelinePath"))
+    }
+
     // MARK: - Real-data smoke test (skipped if the file isn't on disk)
 
     func testDecodesRealLocationHistoryIfPresent() throws {

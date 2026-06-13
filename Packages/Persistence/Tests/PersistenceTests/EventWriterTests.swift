@@ -43,7 +43,7 @@ final class EventWriterTests: XCTestCase {
             WHERE e.kind = 'activity';
         """)
         defer { stmt.finalize() }
-        XCTAssertEqual(stmt.step(), .row)
+        XCTAssertEqual(try stmt.step(), .row)
         XCTAssertEqual(stmt.columnDouble(0), 0.0)
         XCTAssertEqual(stmt.columnDouble(1), 0.0)
         XCTAssertEqual(stmt.columnDouble(2), 0.01)
@@ -58,7 +58,7 @@ final class EventWriterTests: XCTestCase {
 
         let stmt = try database.prepare("SELECT place_id, semantic_type, probability FROM visits;")
         defer { stmt.finalize() }
-        XCTAssertEqual(stmt.step(), .row)
+        XCTAssertEqual(try stmt.step(), .row)
         XCTAssertEqual(stmt.columnText(0), "FIXTURE_PLACE_ALPHA")
         XCTAssertEqual(stmt.columnText(1), "Work")
         XCTAssertEqual(stmt.columnDouble(2), 0.95)
@@ -69,7 +69,7 @@ final class EventWriterTests: XCTestCase {
 
         let stmt = try database.prepare("SELECT count(*) FROM path_points;")
         defer { stmt.finalize() }
-        XCTAssertEqual(stmt.step(), .row)
+        XCTAssertEqual(try stmt.step(), .row)
         XCTAssertEqual(stmt.columnInt(0), 4)
     }
 
@@ -80,7 +80,7 @@ final class EventWriterTests: XCTestCase {
             "SELECT start_tz_offset_min, end_tz_offset_min FROM events WHERE kind = 'activity';"
         )
         defer { stmt.finalize() }
-        XCTAssertEqual(stmt.step(), .row)
+        XCTAssertEqual(try stmt.step(), .row)
         XCTAssertEqual(stmt.columnInt(0), 120) // +02:00
         XCTAssertEqual(stmt.columnInt(1), 120)
     }
@@ -90,6 +90,23 @@ final class EventWriterTests: XCTestCase {
         XCTAssertEqual(written, 0)
     }
 
+    func testReimportingSameEventsIsIdempotent() throws {
+        // Same events (explicit fixed ids) written twice must not duplicate any rows. The
+        // INSERT OR IGNORE on a stable id is what makes re-importing the same Takeout file safe.
+        let events = makeEventsWithFixedIDs()
+        let writer = EventWriter(database: database)
+        try writer.write(events)
+        try writer.write(events)
+
+        let counts = try Persistence.eventCounts(in: database)
+        XCTAssertEqual(counts, .init(total: 3, activities: 1, visits: 1, paths: 1))
+
+        let pathStmt = try database.prepare("SELECT count(*) FROM path_points;")
+        defer { pathStmt.finalize() }
+        XCTAssertEqual(try pathStmt.step(), .row)
+        XCTAssertEqual(pathStmt.columnInt(0), 4, "child path_points must not be re-inserted on re-import")
+    }
+
     func testForeignKeyCascadeDeletesChildren() throws {
         try EventWriter(database: database).write(makeEvents())
 
@@ -97,7 +114,7 @@ final class EventWriterTests: XCTestCase {
 
         let stmt = try database.prepare("SELECT count(*) FROM path_points;")
         defer { stmt.finalize() }
-        XCTAssertEqual(stmt.step(), .row)
+        XCTAssertEqual(try stmt.step(), .row)
         XCTAssertEqual(stmt.columnInt(0), 0, "deleting the parent event should cascade to path_points")
     }
 
@@ -145,5 +162,16 @@ final class EventWriterTests: XCTestCase {
         )
 
         return [activity, visit, path]
+    }
+
+    /// Same shape as `makeEvents` but with stable ids, so two calls produce identical events —
+    /// the precondition for the idempotency check (a real decoder derives deterministic ids).
+    private func makeEventsWithFixedIDs() -> [Event] {
+        let activityID = UUID(uuidString: "00000000-0000-0000-0000-0000000000A1")!
+        let visitID = UUID(uuidString: "00000000-0000-0000-0000-0000000000B2")!
+        let pathID = UUID(uuidString: "00000000-0000-0000-0000-0000000000C3")!
+        return zip(makeEvents(), [activityID, visitID, pathID]).map { event, id in
+            Event(id: id, start: event.start, end: event.end, source: event.source, kind: event.kind)
+        }
     }
 }

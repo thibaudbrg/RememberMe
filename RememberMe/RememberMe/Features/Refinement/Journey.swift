@@ -52,7 +52,7 @@ enum JourneyDetector {
         let sorted = timeline.sorted { $0.start.date < $1.start.date }
         guard let anchor = sorted.firstIndex(where: { $0.id == trip.id }) else { return nil }
         let tripsByID = Dictionary(uniqueKeysWithValues: dayTrips.map { ($0.id, $0) })
-        let anchorIsCar = isCarMode(trip.mode)
+        let anchorIsCar = TripPrecision.isCarMode(trip.mode)
 
         var firstIdx = anchor
         while firstIdx > 0,
@@ -68,7 +68,15 @@ enum JourneyDetector {
             lastIdx += 1
         }
 
-        let entries = Array(sorted[firstIdx ... lastIdx])
+        // Trim non-activity entries (short visits) off both ends. Leading/trailing absorbed
+        // visits fall outside the derived legs' time window, so an apply would supersede them
+        // with nothing covering their slot — they'd vanish from the timeline. After trimming,
+        // `entries` begins and ends with a trip, so every superseded id's window stays inside
+        // [journey.startTime, journey.endTime].
+        var entries = Array(sorted[firstIdx ... lastIdx])
+        while let f = entries.first, f.kind != "activity" { entries.removeFirst() }
+        while let l = entries.last, l.kind != "activity" { entries.removeLast() }
+
         let trips: [TripSummary] = entries.compactMap { entry in
             entry.kind == "activity" ? tripsByID[entry.id] : nil
         }
@@ -94,23 +102,11 @@ enum JourneyDetector {
         switch entry.kind {
         case "activity":
             guard let trip = tripsByID[entry.id] else { return false }
-            return isCarMode(trip.mode) == anchorIsCar
+            return TripPrecision.isCarMode(trip.mode) == anchorIsCar
         case "visit":
             return entry.duration < visitAbsorptionThresholdSeconds
         default:
             return false
         }
-    }
-
-    /// True for activities recorded as a passenger vehicle / car / motorcycle. Matches
-    /// Google Takeout phrasing ("in passenger vehicle", "driving", "motorcycling") and
-    /// the bare granular labels we emit from refinement legs ("driving").
-    private static func isCarMode(_ mode: String) -> Bool {
-        let lower = mode.lowercased()
-        if lower.contains("motorcycl") { return true }
-        if lower.contains("vehicle") { return true }
-        if lower.contains("driving") { return true }
-        if lower == "car" { return true }
-        return false
     }
 }

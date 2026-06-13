@@ -13,7 +13,8 @@ final class RouteSimilarityTests: XCTestCase {
         XCTAssertEqual(score.p95Meters, 0, accuracy: 0.01)
         XCTAssertEqual(score.maxMeters, 0, accuracy: 0.01)
         XCTAssertEqual(score.sampleCount, 3)
-        XCTAssertEqual(score.composite, 0, accuracy: 0.01)
+        // Fit is perfect, so composite is purely the 0.01 * length tie-breaker term.
+        XCTAssertEqual(score.composite, 0.01 * score.candidateLengthMeters, accuracy: 0.01)
     }
 
     func testParallelOffsetScoresApproximateOffsetDistance() throws {
@@ -98,5 +99,39 @@ final class RouteSimilarityTests: XCTestCase {
         XCTAssertEqual(RouteSimilarity.percentile(values, p: 0), 1)
         XCTAssertEqual(RouteSimilarity.percentile(values, p: 1), 5)
         XCTAssertEqual(RouteSimilarity.percentile(values, p: 0.5), 3)
+    }
+
+    func testNearestPointDistanceIsSmallAcrossTheAntimeridian() {
+        // A sample and segment a few km apart but on opposite sides of the 180th meridian.
+        // Without normalizing the longitude delta this projects ~40,000 km instead of ~km.
+        let distance = RouteSimilarity.nearestPointDistance(
+            point: Coordinate(latitude: 0, longitude: 179.99),
+            segmentStart: Coordinate(latitude: 0, longitude: -179.99),
+            segmentEnd: Coordinate(latitude: 0.01, longitude: -179.99)
+        )
+        XCTAssertLessThan(distance, 5_000, "antimeridian-straddling distance should be a few km, not half the globe")
+    }
+
+    func testLengthTieBreakerPrefersShorterCandidateOnEqualFit() throws {
+        // Two candidates both pass exactly through the recorded samples (zero fit distance), but
+        // one detours far north and back. The length tie-breaker must rank the direct one lower.
+        let samples = [
+            Coordinate(latitude: 0, longitude: 0),
+            Coordinate(latitude: 0, longitude: 0.01),
+            Coordinate(latitude: 0, longitude: 0.02),
+        ]
+        let direct = samples
+        let detour = [
+            Coordinate(latitude: 0, longitude: 0),
+            Coordinate(latitude: 0.5, longitude: 0.005), // big northward excursion through unsampled space
+            Coordinate(latitude: 0, longitude: 0.01),
+            Coordinate(latitude: 0, longitude: 0.02),
+        ]
+        let directScore = try XCTUnwrap(RouteSimilarity.score(samples: samples, candidate: direct))
+        let detourScore = try XCTUnwrap(RouteSimilarity.score(samples: samples, candidate: detour))
+        // Both fit the samples well (every sample lies on each candidate), so fit alone wouldn't
+        // distinguish them — the length term must.
+        XCTAssertGreaterThan(detourScore.candidateLengthMeters, directScore.candidateLengthMeters)
+        XCTAssertLessThan(directScore.composite, detourScore.composite)
     }
 }

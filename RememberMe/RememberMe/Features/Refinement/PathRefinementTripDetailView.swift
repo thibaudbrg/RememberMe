@@ -91,8 +91,13 @@ struct PathRefinementTripDetailView: View {
         }
         .onChange(of: controllerStateID) { _, _ in
             // When the fetch finishes with candidates, push directly into Compare routes
-            // instead of showing an interstitial candidate list in this view.
-            if case let .ready(scored) = controller.state, !scored.isEmpty {
+            // instead of showing an interstitial candidate list in this view. Gate on the
+            // fetch identity so a stale fetch landing for a different trip can't push the
+            // wrong trip's candidates into this view. A journey refine sets activeTripID to
+            // its first leg, so compare against the journey-aware ID.
+            if case let .ready(scored) = controller.state, !scored.isEmpty,
+               controller.activeTripID == (journey?.trips.first?.id ?? trip.id)
+            {
                 pendingCandidates = scored
             }
         }
@@ -131,7 +136,7 @@ struct PathRefinementTripDetailView: View {
             LabeledContent("Distance", value: distanceLabel)
             LabeledContent("Samples", value: "\(recordedSamples.count)")
             if isCycling {
-                Text("Routed as walking — Apple Maps doesn't model cycling.")
+                Text("Routed as walking — the routing service doesn't model cycling.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -194,9 +199,7 @@ struct PathRefinementTripDetailView: View {
                     }
                 } label: {
                     Label(
-                        isJourneyMode
-                            ? "Fetch journey routes from \(settings.refinementProvider.label)"
-                            : "Fetch routes from \(settings.refinementProvider.label)",
+                        isJourneyMode ? "Fetch journey routes" : "Fetch routes",
                         systemImage: "arrow.down.circle"
                     )
                 }
@@ -234,7 +237,13 @@ struct PathRefinementTripDetailView: View {
                     .font(.callout)
                     .foregroundStyle(.red)
                 Button {
-                    Task { await controller.fetch(for: trip) }
+                    Task {
+                        if let journey {
+                            await controller.fetch(for: journey)
+                        } else {
+                            await controller.fetch(for: trip)
+                        }
+                    }
                 } label: {
                     Label("Try again", systemImage: "arrow.clockwise")
                 }

@@ -19,7 +19,10 @@ public extension Coordinate {
         let parts = body.split(separator: ",", maxSplits: 1, omittingEmptySubsequences: false)
         guard parts.count == 2,
               let lat = Double(parts[0]),
-              let lon = Double(parts[1])
+              let lon = Double(parts[1]),
+              lat.isFinite, lon.isFinite,
+              (-90 ... 90).contains(lat),
+              (-180 ... 180).contains(lon)
         else {
             return nil
         }

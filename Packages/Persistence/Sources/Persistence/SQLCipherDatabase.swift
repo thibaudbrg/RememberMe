@@ -31,15 +31,23 @@ public enum DatabaseError: Error, CustomStringConvertible {
 
 /// Thin Swift wrapper around an opaque SQLite handle compiled with SQLCipher.
 ///
-/// Marked `@unchecked Sendable` because we open with `SQLITE_OPEN_FULLMUTEX`, which makes SQLite
-/// itself serialise concurrent C-API calls on the same handle. Prepared statements (`PreparedStatement`)
-/// are also `@unchecked Sendable` for the same reason — but a single statement should not be stepped
-/// from two threads at once; the codebase only ever uses a statement within one function call.
+/// Marked `@unchecked Sendable`. We open with `SQLITE_OPEN_FULLMUTEX`, which serialises individual
+/// C-API calls on the same handle — but that only covers a single call, NOT the multi-statement
+/// scope of a transaction. Because the codebase drives this one shared connection from several
+/// threads at once (live tracker, importer, geocoder, refinement), an `NSRecursiveLock` serialises
+/// access so a transaction owns the connection for its whole `BEGIN…COMMIT` scope and single-statement
+/// writes can't silently interleave into another thread's open transaction. The lock is recursive so
+/// statements run inside a `transaction` block re-enter on the same thread.
 public final class SQLCipherDatabase: @unchecked Sendable {
     /// Special path passed to `init` to open an ephemeral in-memory database. Used by tests.
     public static let inMemoryPath = ":memory:"
 
     private let handle: OpaquePointer
+
+    /// Serialises access to the single shared connection across threads. Held for the whole scope of
+    /// `transaction()` and around every single-statement write path. Recursive so a transaction
+    /// block's own `execute`/`prepare`/`step` calls re-enter without deadlocking.
+    private let lock = NSRecursiveLock()
 
     /// Opens a database at `path` and unlocks it with the supplied raw key. Throws on any failure.
     ///
@@ -96,6 +104,8 @@ public final class SQLCipherDatabase: @unchecked Sendable {
     /// Runs one or more SQL statements that don't return rows. Useful for CREATE TABLE, PRAGMA, BEGIN, COMMIT.
     @discardableResult
     public func execute(_ sql: String) throws -> Int32 {
+        lock.lock()
+        defer { lock.unlock() }
         var errorMessage: UnsafeMutablePointer<CChar>?
         let code = sqlite3_exec(handle, sql, nil, nil, &errorMessage)
         if code != SQLITE_OK {
@@ -110,7 +120,7 @@ public final class SQLCipherDatabase: @unchecked Sendable {
     public func userVersion() throws -> Int32 {
         let statement = try prepare("PRAGMA user_version;")
         defer { statement.finalize() }
-        switch statement.step() {
+        switch try statement.step() {
         case .row: return statement.columnInt32(0)
         case .done: return 0
         }
@@ -120,19 +130,33 @@ public final class SQLCipherDatabase: @unchecked Sendable {
         try execute("PRAGMA user_version = \(version);")
     }
 
+    /// Prepares a statement. Acquires `lock` and hands ownership of it to the returned
+    /// `PreparedStatement`, which releases it on `finalize()`/`deinit` — so the whole
+    /// prepare→bind→step→finalize lifecycle of a single-statement read/write owns the connection
+    /// and can't interleave into another thread's open transaction. Every call site finalises in a
+    /// `defer`, so the lock is always released. Recursive, so statements inside a `transaction` block
+    /// re-enter on the same thread.
     public func prepare(_ sql: String) throws -> PreparedStatement {
+        lock.lock()
         var rawStatement: OpaquePointer?
         let code = sqlite3_prepare_v2(handle, sql, -1, &rawStatement, nil)
         guard code == SQLITE_OK, let prepared = rawStatement else {
             let message = String(cString: sqlite3_errmsg(handle))
             if let s = rawStatement { sqlite3_finalize(s) }
+            lock.unlock()
             throw DatabaseError.prepareFailed(sql: sql, code: code, message: message)
         }
-        return PreparedStatement(handle: prepared, dbHandle: handle, sql: sql)
+        return PreparedStatement(handle: prepared, dbHandle: handle, sql: sql, lock: lock)
     }
 
     /// Runs `block` inside `BEGIN IMMEDIATE` / `COMMIT`. Rolls back on throw.
+    ///
+    /// Holds `lock` for the entire `BEGIN…COMMIT/ROLLBACK` scope so the transaction owns the
+    /// connection — no other thread's statement can interleave into it. The lock is recursive, so the
+    /// block's own `execute`/`prepare`/`step` calls re-enter on this thread without deadlocking.
     public func transaction<T>(_ block: () throws -> T) throws -> T {
+        lock.lock()
+        defer { lock.unlock() }
         try execute("BEGIN IMMEDIATE;")
         let result: T
         do {
@@ -141,7 +165,15 @@ public final class SQLCipherDatabase: @unchecked Sendable {
             _ = try? execute("ROLLBACK;")
             throw error
         }
-        try execute("COMMIT;")
+        do {
+            try execute("COMMIT;")
+        } catch {
+            // A failed COMMIT (SQLITE_FULL, I/O error, …) can leave the connection inside the open
+            // transaction. Roll back to restore autocommit before rethrowing; if SQLite already
+            // auto-rolled-back, the ROLLBACK just errors harmlessly and is ignored.
+            _ = try? execute("ROLLBACK;")
+            throw error
+        }
         return result
     }
 }

@@ -12,66 +12,111 @@ struct MapScreen: View {
     @State private var showLabels = true
     @State private var is3D = false
     @State private var showingSettings = false
-    /// Most recent camera/region the user is looking at — captured from `onMapCameraChange`.
-    /// `currentCamera` is what the 3D toggle rebuilds with a new pitch; `currentRegion` is
-    /// kept for the other camera-fit functions that work in regions.
+    /// Most recent camera the user is looking at — captured from `onMapCameraChange`.
+    /// Used by the 3D toggle (rebuilds the camera with a new pitch) and by the photo-cluster
+    /// computation (its zoom threshold scales with `camera.distance`).
     @State private var currentCamera: MapCamera?
-    @State private var currentRegion: MKCoordinateRegion?
     @State private var selectedPhoto: GeoPhoto?
+    @State private var selectedCluster: PhotoCluster?
     @State private var locationManager = LocateMeManager()
+    /// True between a Locate Me tap with no cached fix and the fix arriving — so the first
+    /// tap (when `lastKnown` is still nil) centers once the fresh fix lands.
+    @State private var pendingLocate = false
+    /// Photo clusters for the current day. Kept in @State and recomputed via onChange of its
+    /// inputs (photos + camera distance) so the O(n²) clustering doesn't re-run on every body
+    /// evaluation (e.g. every camera-gesture end).
+    @State private var dayPhotoClusters: [PhotoCluster] = []
 
     var body: some View {
         @Bindable var env = environment
 
         GeometryReader { proxy in
-            Map(position: $cameraPosition) {
-                UserAnnotation()
-                tripPolylines
-                photoAnnotations
-                if settings.showDirectionArrows {
-                    directionArrowAnnotations
+            // ZStack so the right-edge buttons and the bottom Locate Me sit as siblings
+            // of the Map. We tried scope-bound `MapCompass` placed in this stack so it
+            // would land below the Settings button — Apple's docs claim it works, but in
+            // practice (iOS 26) the compass never received heading updates from the Map.
+            // Falling back to the system-placed compass via `.mapControls { MapCompass() }`,
+            // which DOES rotate live and snap to north — at the cost of landing at the
+            // top-right of the safe area (same column as the buttons, only appears when
+            // the map is rotated).
+            ZStack {
+                Map(position: $cameraPosition) {
+                    UserAnnotation()
+                    tripPolylines
+                    livePathPolyline
+                    photoAnnotations
+                    if settings.showDirectionArrows {
+                        directionArrowAnnotations
+                    }
+                    visitMarkerAnnotations
                 }
-                visitMarkerAnnotations
-            }
-            .mapStyle(activeMapStyle)
-            .ignoresSafeArea()
-            .onChange(of: environment.selectedDay) { _, _ in recenter(in: proxy.size) }
-            .onChange(of: environment.dayMarkers) { _, _ in recenter(in: proxy.size) }
-            .onChange(of: environment.dayPhotos) { _, _ in recenter(in: proxy.size) }
-            .onChange(of: environment.drawerSize) { _, _ in reapplyCamera(in: proxy.size) }
-            .onChange(of: is3D) { _, _ in tiltCurrentView() }
-            .onMapCameraChange(frequency: .onEnd) { context in
-                currentCamera = context.camera
-                currentRegion = context.region
-            }
-            .onChange(of: environment.focusedItem) { _, item in
-                if let item { focus(on: item, in: proxy.size) } else { recenter(in: proxy.size) }
-            }
-            .task { recenter(in: proxy.size) }
-            .sheet(item: $env.selectedPlace, onDismiss: {
-                // When the user returns from a place detail, drop the map's focused item so the
-                // camera re-fits the whole day instead of staying zoomed in on the tapped marker.
-                environment.clearFocus()
-            }) { marker in
-                PlaceDetailView(marker: marker)
-            }
-            .sheet(isPresented: $showingSettings) {
-                SettingsSheet()
-            }
-            .sheet(item: $selectedPhoto) { photo in
-                PhotoDetailView(photo: photo)
-            }
-            .task(id: environment.selectedDay) {
-                // Refresh photos whenever the day changes — no-op if the toggle is off.
-                await environment.loadDayPhotos(enabled: settings.showPhotosOnMap)
-            }
-            .task(id: settings.showPhotosOnMap) {
-                await environment.loadDayPhotos(enabled: settings.showPhotosOnMap)
-            }
-            // Overlay buttons. The Map ignores safe area (so it draws all the way to the
-            // top edge), but we manually pad the buttons by the device's safe-area top inset
-            // so they sit BELOW the dynamic island / status bar.
-            .overlay(alignment: .topTrailing) {
+                .mapStyle(activeMapStyle)
+                .mapControls {
+                    MapCompass()
+                }
+                .ignoresSafeArea()
+                .onChange(of: environment.selectedDay) { _, _ in recenter(in: proxy.size) }
+                .onChange(of: environment.dayMarkers) { _, _ in reapplyCamera(in: proxy.size) }
+                .onChange(of: environment.dayPhotos) { _, _ in reapplyCamera(in: proxy.size) }
+                .onChange(of: environment.drawerSize) { _, _ in reapplyCamera(in: proxy.size) }
+                .onChange(of: is3D) { _, _ in tiltCurrentView() }
+                .onChange(of: locationManager.fixCount) { _, _ in
+                    // First Locate Me tap had no cached fix; center now that one has arrived.
+                    guard pendingLocate, let coordinate = locationManager.lastKnown else { return }
+                    pendingLocate = false
+                    centerOn(coordinate, in: proxy.size)
+                }
+                .onMapCameraChange(frequency: .onEnd) { context in
+                    // Wrap in an animation so cluster recomputation (which depends on
+                    // `currentCamera.distance`) fades clusters in/out smoothly when the
+                    // zoom changes — without this they snap at the end of the pinch.
+                    withAnimation(.easeInOut(duration: 0.4)) {
+                        currentCamera = context.camera
+                        recomputePhotoClusters()
+                    }
+                }
+                .onChange(of: environment.dayPhotos) { _, _ in recomputePhotoClusters() }
+                .onChange(of: environment.focusedItem) { _, item in
+                    if let item { focus(on: item, in: proxy.size) } else { recenter(in: proxy.size) }
+                }
+                .task {
+                    recenter(in: proxy.size)
+                    recomputePhotoClusters()
+                }
+                .sheet(item: $env.selectedPlace, onDismiss: {
+                    // When the user returns from a place detail, drop the map's focused item so the
+                    // camera re-fits the whole day instead of staying zoomed in on the tapped marker.
+                    environment.clearFocus()
+                }) { marker in
+                    PlaceDetailView(marker: marker)
+                }
+                .sheet(isPresented: $showingSettings) {
+                    SettingsSheet()
+                }
+                .sheet(item: $selectedPhoto) { photo in
+                    PhotoDetailView(photo: photo)
+                }
+                .sheet(item: $selectedCluster) { cluster in
+                    PhotoCarouselView(photos: cluster.photos)
+                }
+                .task(id: environment.selectedDay) {
+                    // Refresh photos whenever the day changes — no-op if the toggle is off.
+                    await environment.loadDayPhotos(enabled: settings.showPhotosOnMap)
+                }
+                .task(id: environment.selectedRange) {
+                    // Day / Week / Month switch widens `dayRange` without changing
+                    // `selectedDay`, so the date-keyed task above wouldn't fire. Reload
+                    // here so the grid + map cover the full visible window.
+                    await environment.loadDayPhotos(enabled: settings.showPhotosOnMap)
+                }
+                .task(id: settings.showPhotosOnMap) {
+                    await environment.loadDayPhotos(enabled: settings.showPhotosOnMap)
+                }
+
+                // Sibling 1 — top-right button stack. The system compass (from
+                // `.mapControls { MapCompass() }` above) will appear at the top-right
+                // of the safe area when the map is rotated, briefly visually adjacent
+                // to these buttons.
                 VStack(spacing: 10) {
                     MapLayersButton(
                         baseStyle: $baseStyle,
@@ -82,15 +127,17 @@ struct MapScreen: View {
                 }
                 .padding(.trailing, 12)
                 .padding(.top, proxy.safeAreaInsets.top + 8)
-            }
-            // "Locate me" floating button — standard Apple Maps placement: bottom-right.
-            // The button is ~48pt tall; we leave a generous 24pt gap above the drawer so it's
-            // fully visible even at the .medium detent where Apple's actual sheet height runs
-            // a few points taller than our 50% estimate.
-            .overlay(alignment: .bottomTrailing) {
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+
+                // Sibling 2 — bottom-right "Locate me" floating button. Sits a generous
+                // 24pt above the drawer so it stays fully visible at the .medium detent
+                // (which is ~50% of screen height plus a few extra points in practice).
                 LocateMeButton {
                     if let coordinate = locationManager.requestAndStartIfNeeded() {
                         centerOn(coordinate, in: proxy.size)
+                    } else {
+                        // No cached fix yet — wait for the one-shot request to deliver one.
+                        pendingLocate = true
                     }
                 }
                 .padding(.trailing, 12)
@@ -98,6 +145,7 @@ struct MapScreen: View {
                     .bottom,
                     environment.drawerSize.heightInPoints(screenHeight: proxy.size.height) + 72
                 )
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
             }
         }
     }
@@ -133,24 +181,56 @@ struct MapScreen: View {
 
     @MapContentBuilder
     private var tripPolylines: some MapContent {
-        ForEach(tripRenders) { render in
+        ForEach(environment.dayTripRenders) { render in
             MapPolyline(coordinates: render.coordinates.map(asCLLocationCoordinate))
                 .stroke(settings.accent.color, style: strokeStyle(for: render.mode))
         }
     }
 
+    /// In-progress trip breadcrumb from the live tracker — a dashed provisional
+    /// line up to the latest GPS fix. Only shown when the visible range covers
+    /// "now"; it disappears when the trip closes (the persisted path replaces it).
+    @MapContentBuilder
+    private var livePathPolyline: some MapContent {
+        let live = environment.tracker.livePathCoordinates
+        if live.count >= 2, environment.dayRange.contains(Date()) {
+            MapPolyline(coordinates: live.map(asCLLocationCoordinate))
+                .stroke(
+                    settings.accent.color.opacity(0.7),
+                    style: StrokeStyle(lineWidth: 4, lineCap: .round, lineJoin: .round, dash: [6, 6])
+                )
+        }
+    }
+
+    /// Recomputes `dayPhotoClusters` from the current photos + camera zoom. Called from
+    /// onChange of those inputs so clustering stays out of `body`. The threshold (in metres)
+    /// tracks pixel density on screen: at deep zoom every photo becomes its own cluster; at
+    /// neighbourhood zoom photos taken at the same café merge into one badge-decorated icon.
+    private func recomputePhotoClusters() {
+        dayPhotoClusters = PhotoCluster.cluster(
+            environment.dayPhotos,
+            cameraDistance: currentCamera?.distance
+        )
+    }
+
     @MapContentBuilder
     private var photoAnnotations: some MapContent {
-        ForEach(environment.dayPhotos) { photo in
+        ForEach(dayPhotoClusters) { cluster in
             Annotation(
                 "",
                 coordinate: CLLocationCoordinate2D(
-                    latitude: photo.coordinate.latitude,
-                    longitude: photo.coordinate.longitude
+                    latitude: cluster.coordinate.latitude,
+                    longitude: cluster.coordinate.longitude
                 )
             ) {
-                PhotoThumbnail(photo: photo, photoLibrary: environment.photoLibrary)
-                    .onTapGesture { selectedPhoto = photo }
+                PhotoClusterThumbnail(cluster: cluster, photoLibrary: environment.photoLibrary)
+                    .onTapGesture {
+                        if cluster.photos.count == 1 {
+                            selectedPhoto = cluster.photos[0]
+                        } else {
+                            selectedCluster = cluster
+                        }
+                    }
             }
             .annotationTitles(.hidden)
         }
@@ -158,7 +238,7 @@ struct MapScreen: View {
 
     @MapContentBuilder
     private var directionArrowAnnotations: some MapContent {
-        ForEach(directionMarkers) { marker in
+        ForEach(environment.dayDirectionMarkers) { marker in
             Annotation(
                 "",
                 coordinate: CLLocationCoordinate2D(
@@ -193,22 +273,6 @@ struct MapScreen: View {
     }
 
     // MARK: - Polyline rendering
-
-    private var tripRenders: [TripRenderPlan.PolylineRender] {
-        TripRenderPlan.renders(
-            paths: environment.dayPathTraces,
-            activities: environment.dayTrips,
-            refinedByActivity: environment.dayRefinedPolylines
-        )
-    }
-
-    /// Sparse direction-of-travel markers along the rendered polylines. We sample a few
-    /// evenly-spaced points per polyline and tag each with the local bearing.
-    private var directionMarkers: [DirectionMarker] {
-        tripRenders.flatMap { render in
-            PolylineDirection.markers(for: render.coordinates, polylineID: render.id)
-        }
-    }
 
     private func strokeStyle(for mode: String) -> StrokeStyle {
         // Every trip is just a solid line now — the dashed walking variant has been retired.
